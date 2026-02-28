@@ -199,6 +199,30 @@ def test_topic_routing_no_expected():
 
 
 @pytest.mark.asyncio
+async def test_evaluate_case_context_required_skip(mock_env):
+    """Context-requiring metrics return a skip result when no context is provided."""
+    with patch("eval_engine._get_judge_model", return_value=_mock_judge()):
+        from eval_engine import evaluate_case
+
+        result = await evaluate_case(
+            turns=[{"role": "user", "content": "What is AI?"}],
+            conversation=[
+                {"role": "user", "content": "What is AI?"},
+                {"role": "assistant", "content": "AI is artificial intelligence."},
+            ],
+            expected_output="AI is artificial intelligence.",
+            context="",
+            metric_names=["hallucination", "faithfulness"],
+            threshold=0.5,
+        )
+
+    for name in ("hallucination", "faithfulness"):
+        assert result[name]["score"] == 0.0
+        assert result[name]["passed"] is False
+        assert "requires context" in result[name]["reason"]
+
+
+@pytest.mark.asyncio
 async def test_evaluate_case_topic_routing(mock_env):
     """Verify topic_routing dispatches to _evaluate_topic_routing without hitting DeepEval."""
     from eval_engine import evaluate_case

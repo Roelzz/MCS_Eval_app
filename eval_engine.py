@@ -19,7 +19,7 @@ from deepeval.metrics import (
     ToxicityMetric,
 )
 from deepeval.models import AzureOpenAIModel
-from deepeval.test_case import ConversationalTestCase, LLMTestCase, Turn
+from deepeval.test_case import ConversationalTestCase, LLMTestCase, LLMTestCaseParams, Turn
 from loguru import logger
 
 
@@ -58,7 +58,11 @@ METRIC_REGISTRY: dict[str, Any] = {
             "Consider if the response directly addresses the user's need "
             "and provides a complete answer."
         ),
-        evaluation_params=["input", "actual_output", "expected_output"],
+        evaluation_params=[
+            LLMTestCaseParams.INPUT,
+            LLMTestCaseParams.ACTUAL_OUTPUT,
+            LLMTestCaseParams.EXPECTED_OUTPUT,
+        ],
     ),
     "hallucination": lambda model, threshold: HallucinationMetric(
         model=model, threshold=threshold
@@ -86,7 +90,7 @@ def _build_conversational_test_case(
     for msg in conversation:
         deepeval_turns.append(
             Turn(
-                role=msg["role"] if msg["role"] != "assistant" else "llm",
+                role=msg["role"],
                 content=msg["content"],
             )
         )
@@ -117,6 +121,7 @@ def _build_llm_test_case(
     if expected_output:
         kwargs["expected_output"] = expected_output
     if context:
+        kwargs["context"] = [context]
         kwargs["retrieval_context"] = [context]
 
     return LLMTestCase(**kwargs)
@@ -127,6 +132,8 @@ CONVERSATIONAL_METRICS = {
     "knowledge_retention",
     "role_adherence",
 }
+
+CONTEXT_REQUIRED_METRICS = {"hallucination", "faithfulness"}
 
 
 def _evaluate_topic_routing(
@@ -195,6 +202,14 @@ async def evaluate_case(
 
         if name not in METRIC_REGISTRY:
             logger.warning(f"Unknown metric: {name}")
+            continue
+
+        if name in CONTEXT_REQUIRED_METRICS and not context:
+            results[name] = {
+                "score": 0.0,
+                "reason": f"Metric '{name}' requires context in test case",
+                "passed": False,
+            }
             continue
 
         if model is None:
