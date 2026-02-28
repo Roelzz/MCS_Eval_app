@@ -135,6 +135,52 @@ CONVERSATIONAL_METRICS = {
 
 CONTEXT_REQUIRED_METRICS = {"hallucination", "faithfulness"}
 
+# Tier 1: deterministic checks — no LLM cost, run before AI metrics
+TIER1_METRICS = {"exact_match", "keyword_match_any", "keyword_match_all", "topic_routing"}
+
+
+def _evaluate_exact_match(actual: str, expected: str) -> dict:
+    """Case-insensitive exact string match."""
+    if not expected:
+        return {"score": 1.0, "reason": "No expected output specified", "passed": True}
+    passed = actual.strip().lower() == expected.strip().lower()
+    return {
+        "score": 1.0 if passed else 0.0,
+        "reason": "Exact match" if passed else f"Expected: '{expected}' | Got: '{actual}'",
+        "passed": passed,
+    }
+
+
+def _evaluate_keyword_match(actual: str, keywords: list[str], mode: str) -> dict:
+    """Check keyword presence in actual output.
+
+    mode='any': at least one keyword must appear
+    mode='all': every keyword must appear
+    """
+    if not keywords:
+        return {"score": 1.0, "reason": "No keywords specified", "passed": True}
+
+    actual_lower = actual.lower()
+    found = [kw for kw in keywords if kw.lower() in actual_lower]
+    missing = [kw for kw in keywords if kw.lower() not in actual_lower]
+
+    if mode == "any":
+        passed = len(found) > 0
+        reason = (
+            f"Found keyword(s): {', '.join(found)}"
+            if passed
+            else f"None of the keywords found: {', '.join(keywords)}"
+        )
+    else:  # all
+        passed = len(missing) == 0
+        reason = (
+            f"All keywords found: {', '.join(keywords)}"
+            if passed
+            else f"Missing keyword(s): {', '.join(missing)}"
+        )
+
+    return {"score": 1.0 if passed else 0.0, "reason": reason, "passed": passed}
+
 
 def _evaluate_topic_routing(
     activities: list[dict],
@@ -186,8 +232,13 @@ async def evaluate_case(
     threshold: float = 0.5,
     activities: list[dict] | None = None,
     expected_topic: str = "",
+    keywords_any: list[str] | None = None,
+    keywords_all: list[str] | None = None,
 ) -> dict[str, dict]:
     """Run selected metrics on a test case.
+
+    Tier 1 (deterministic, no LLM cost) run first: exact_match, keyword_match_any,
+    keyword_match_all, topic_routing. Tier 2 (DeepEval AI metrics) run after.
 
     Returns:
         Dict mapping metric_name -> {"score": float, "reason": str, "passed": bool}
@@ -195,7 +246,26 @@ async def evaluate_case(
     results: dict[str, dict] = {}
     model = None
 
+    actual_output = ""
+    for msg in reversed(conversation):
+        if msg["role"] == "assistant":
+            actual_output = msg["content"]
+            break
+
     for name in metric_names:
+        # --- Tier 1: deterministic checks ---
+        if name == "exact_match":
+            results[name] = _evaluate_exact_match(actual_output, expected_output)
+            continue
+
+        if name == "keyword_match_any":
+            results[name] = _evaluate_keyword_match(actual_output, keywords_any or [], "any")
+            continue
+
+        if name == "keyword_match_all":
+            results[name] = _evaluate_keyword_match(actual_output, keywords_all or [], "all")
+            continue
+
         if name == "topic_routing":
             results[name] = _evaluate_topic_routing(activities or [], expected_topic)
             continue

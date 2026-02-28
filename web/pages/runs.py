@@ -13,8 +13,13 @@ from web.models import Dataset, EvalResult, EvalRun
 from web.state import State
 
 AVAILABLE_METRICS = [
-    "answer_relevancy",
+    # Tier 1 — deterministic, no LLM cost
+    "exact_match",
+    "keyword_match_any",
+    "keyword_match_all",
     "topic_routing",
+    # Tier 2 — AI judge (DeepEval)
+    "answer_relevancy",
     "conversation_completeness",
     "knowledge_retention",
     "role_adherence",
@@ -212,6 +217,8 @@ class RunState(State):
                 expected = case.get("expected_output", "")
                 context = case.get("context", "")
                 expected_topic = case.get("expected_topic", "")
+                keywords_any = case.get("keywords_any", [])
+                keywords_all = case.get("keywords_all", [])
 
                 start = time.time()
                 conversation, activities = await run_conversation(turns)
@@ -227,6 +234,8 @@ class RunState(State):
                     threshold=threshold,
                     activities=activities,
                     expected_topic=expected_topic,
+                    keywords_any=keywords_any,
+                    keywords_all=keywords_all,
                 )
 
                 avg_case_score = (

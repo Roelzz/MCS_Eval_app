@@ -248,3 +248,157 @@ async def test_evaluate_case_topic_routing(mock_env):
     assert "topic_routing" in result
     assert result["topic_routing"]["score"] == 1.0
     assert result["topic_routing"]["passed"] is True
+
+
+# --- Tier 1 metric tests ---
+
+
+def test_exact_match_hit():
+    from eval_engine import _evaluate_exact_match
+
+    result = _evaluate_exact_match("Python is a programming language.", "Python is a programming language.")
+    assert result["score"] == 1.0
+    assert result["passed"] is True
+
+
+def test_exact_match_miss():
+    from eval_engine import _evaluate_exact_match
+
+    result = _evaluate_exact_match("Python is great.", "Python is a programming language.")
+    assert result["score"] == 0.0
+    assert result["passed"] is False
+    assert "Python is a programming language." in result["reason"]
+
+
+def test_exact_match_case_insensitive():
+    from eval_engine import _evaluate_exact_match
+
+    result = _evaluate_exact_match("HELLO WORLD", "hello world")
+    assert result["score"] == 1.0
+    assert result["passed"] is True
+
+
+def test_exact_match_no_expected():
+    from eval_engine import _evaluate_exact_match
+
+    result = _evaluate_exact_match("anything", "")
+    assert result["score"] == 1.0
+    assert result["passed"] is True
+
+
+def test_keyword_match_any_one_found():
+    from eval_engine import _evaluate_keyword_match
+
+    result = _evaluate_keyword_match("You have 5 vacation days remaining.", ["days remaining", "holiday"], "any")
+    assert result["score"] == 1.0
+    assert result["passed"] is True
+    assert "days remaining" in result["reason"]
+
+
+def test_keyword_match_any_none_found():
+    from eval_engine import _evaluate_keyword_match
+
+    result = _evaluate_keyword_match("No relevant content here.", ["days remaining", "vacation"], "any")
+    assert result["score"] == 0.0
+    assert result["passed"] is False
+
+
+def test_keyword_match_all_all_found():
+    from eval_engine import _evaluate_keyword_match
+
+    result = _evaluate_keyword_match(
+        "Policy ID: 123 expires on 2025-12-31",
+        ["Policy ID:", "expires"],
+        "all",
+    )
+    assert result["score"] == 1.0
+    assert result["passed"] is True
+
+
+def test_keyword_match_all_partial():
+    from eval_engine import _evaluate_keyword_match
+
+    result = _evaluate_keyword_match(
+        "Policy ID: 123",
+        ["Policy ID:", "expires"],
+        "all",
+    )
+    assert result["score"] == 0.0
+    assert result["passed"] is False
+    assert "expires" in result["reason"]
+
+
+def test_keyword_match_empty_keywords():
+    from eval_engine import _evaluate_keyword_match
+
+    result = _evaluate_keyword_match("anything", [], "any")
+    assert result["score"] == 1.0
+    assert result["passed"] is True
+
+
+@pytest.mark.asyncio
+async def test_evaluate_case_exact_match(mock_env):
+    """exact_match dispatches without hitting DeepEval."""
+    from eval_engine import evaluate_case
+
+    result = await evaluate_case(
+        turns=[{"role": "user", "content": "Say hello"}],
+        conversation=[
+            {"role": "user", "content": "Say hello"},
+            {"role": "assistant", "content": "Hello!"},
+        ],
+        expected_output="Hello!",
+        context="",
+        metric_names=["exact_match"],
+        threshold=0.5,
+    )
+
+    assert "exact_match" in result
+    assert result["exact_match"]["score"] == 1.0
+    assert result["exact_match"]["passed"] is True
+
+
+@pytest.mark.asyncio
+async def test_evaluate_case_keyword_match_any(mock_env):
+    """keyword_match_any dispatches without hitting DeepEval."""
+    from eval_engine import evaluate_case
+
+    result = await evaluate_case(
+        turns=[{"role": "user", "content": "Check leave balance"}],
+        conversation=[
+            {"role": "user", "content": "Check leave balance"},
+            {"role": "assistant", "content": "You have 10 days remaining this year."},
+        ],
+        expected_output="",
+        context="",
+        metric_names=["keyword_match_any"],
+        threshold=0.5,
+        keywords_any=["days remaining", "vacation balance"],
+    )
+
+    assert "keyword_match_any" in result
+    assert result["keyword_match_any"]["score"] == 1.0
+    assert result["keyword_match_any"]["passed"] is True
+
+
+@pytest.mark.asyncio
+async def test_evaluate_case_keyword_match_all(mock_env):
+    """keyword_match_all fails when not all keywords are present."""
+    from eval_engine import evaluate_case
+
+    result = await evaluate_case(
+        turns=[{"role": "user", "content": "Get policy"}],
+        conversation=[
+            {"role": "user", "content": "Get policy"},
+            {"role": "assistant", "content": "Policy ID: 123"},
+        ],
+        expected_output="",
+        context="",
+        metric_names=["keyword_match_all"],
+        threshold=0.5,
+        keywords_all=["Policy ID:", "expires"],
+    )
+
+    assert "keyword_match_all" in result
+    assert result["keyword_match_all"]["score"] == 0.0
+    assert result["keyword_match_all"]["passed"] is False
