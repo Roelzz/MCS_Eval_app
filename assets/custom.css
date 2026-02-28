@@ -1,0 +1,184 @@
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+:root {
+    --font-body: 'Outfit', -apple-system, sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+    --surface-glass: rgba(255, 255, 255, 0.03);
+    --surface-glass-hover: rgba(255, 255, 255, 0.06);
+    --border-subtle: rgba(255, 255, 255, 0.06);
+    --border-active: rgba(94, 234, 212, 0.3);
+    --glow-teal: 0 0 20px rgba(94, 234, 212, 0.08);
+    --score-green: #34d399;
+    --score-yellow: #fbbf24;
+    --score-red: #f87171;
+}
+
+body {
+    font-family: var(--font-body) !important;
+    background: #0a0a0f !important;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+/* Headings */
+h1, h2, h3, h4, h5, h6,
+[class*="rt-Heading"] {
+    font-family: var(--font-body) !important;
+    letter-spacing: -0.02em;
+}
+
+/* Monospace for data elements */
+code, [class*="rt-Code"],
+[data-mono="true"] {
+    font-family: var(--font-mono) !important;
+}
+
+/* Card glass effect */
+[class*="rt-Card"] {
+    background: var(--surface-glass) !important;
+    border: 1px solid var(--border-subtle) !important;
+    backdrop-filter: blur(12px);
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+[class*="rt-Card"]:hover {
+    border-color: rgba(255, 255, 255, 0.1) !important;
+}
+
+/* Table styling */
+[class*="rt-TableRoot"] {
+    --table-row-background-hover: rgba(255, 255, 255, 0.03);
+}
+
+[class*="rt-TableHeader"] {
+    background: rgba(255, 255, 255, 0.02);
+}
+
+[class*="rt-TableColumnHeaderCell"] {
+    font-family: var(--font-body) !important;
+    font-weight: 500 !important;
+    font-size: 0.75rem !important;
+    letter-spacing: 0.05em !important;
+    text-transform: uppercase !important;
+    color: var(--gray-a9) !important;
+    border-bottom: 1px solid var(--border-subtle) !important;
+}
+
+[class*="rt-TableCell"] {
+    border-bottom: 1px solid rgba(255, 255, 255, 0.03) !important;
+    font-size: 0.875rem;
+}
+
+[class*="rt-TableRow"]:hover {
+    background: var(--surface-glass-hover) !important;
+}
+
+/* Badge refinements */
+[class*="rt-Badge"] {
+    font-family: var(--font-mono) !important;
+    font-size: 0.7rem !important;
+    letter-spacing: 0.03em;
+    font-weight: 500 !important;
+}
+
+/* Input refinements */
+[class*="rt-TextFieldInput"],
+[class*="rt-TextAreaInput"],
+[class*="rt-SelectTrigger"] {
+    background: rgba(255, 255, 255, 0.03) !important;
+    border: 1px solid var(--border-subtle) !important;
+    font-family: var(--font-body) !important;
+    transition: border-color 0.2s ease;
+}
+
+[class*="rt-TextFieldInput"]:focus,
+[class*="rt-TextAreaInput"]:focus {
+    border-color: var(--accent-8) !important;
+    box-shadow: 0 0 0 1px var(--accent-8) !important;
+}
+
+/* Button refinements */
+[class*="rt-Button"] {
+    font-family: var(--font-body) !important;
+    font-weight: 500 !important;
+    letter-spacing: 0.01em;
+    transition: all 0.15s ease;
+}
+
+/* Dialog overlay */
+[class*="rt-DialogOverlay"],
+[class*="rt-AlertDialogOverlay"] {
+    backdrop-filter: blur(8px);
+    background: rgba(0, 0, 0, 0.7) !important;
+}
+
+[class*="rt-DialogContent"],
+[class*="rt-AlertDialogContent"] {
+    background: #111118 !important;
+    border: 1px solid var(--border-subtle) !important;
+}
+
+/* Separator */
+[class*="rt-Separator"] {
+    background-color: var(--border-subtle) !important;
+}
+
+/* Progress bar */
+[class*="rt-ProgressIndicator"] {
+    background: var(--accent-9) !important;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.2);
+}
+
+/* Recharts overrides for dark theme */
+.recharts-cartesian-grid-horizontal line,
+.recharts-cartesian-grid-vertical line {
+    stroke: rgba(255, 255, 255, 0.05) !important;
+}
+
+.recharts-text {
+    font-family: var(--font-mono) !important;
+    font-size: 0.7rem !important;
+    fill: var(--gray-a9) !important;
+}
+
+.recharts-tooltip-wrapper .recharts-default-tooltip {
+    background: #111118 !important;
+    border: 1px solid var(--border-subtle) !important;
+    border-radius: 6px !important;
+    font-family: var(--font-mono) !important;
+    font-size: 0.75rem !important;
+}
+
+/* Callout refinements */
+[class*="rt-CalloutRoot"] {
+    border: 1px solid var(--border-subtle) !important;
+}
+
+/* Checkbox */
+[class*="rt-CheckboxButton"] {
+    border: 1px solid var(--border-subtle);
+}
+
+/* Sidebar active link indicator */
+.sidebar-link-active {
+    background: var(--accent-a3) !important;
+    border-left: 2px solid var(--accent-9) !important;
+}

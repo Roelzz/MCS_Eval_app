@@ -1,0 +1,316 @@
+"""Settings page — config display, connection test, test agent, app registration guide."""
+
+import os
+
+import reflex as rx
+
+from web.components import layout, page_header
+from web.state import State
+
+ENV_VARS = [
+    ("AZURE_AD_TENANT_ID", "Azure AD Tenant ID"),
+    ("AZURE_AD_CLIENT_ID", "Azure AD Client ID"),
+    ("AZURE_AD_CLIENT_SECRET", "Azure AD Client Secret"),
+    ("COPILOT_ENVIRONMENT_ID", "Copilot Environment ID"),
+    ("COPILOT_AGENT_IDENTIFIER", "Copilot Agent Identifier"),
+    ("AZURE_OPENAI_ENDPOINT", "Azure OpenAI Endpoint"),
+    ("AZURE_OPENAI_API_KEY", "Azure OpenAI API Key"),
+    ("AZURE_OPENAI_DEPLOYMENT_NAME", "Azure OpenAI Deployment"),
+    ("AZURE_OPENAI_API_VERSION", "Azure OpenAI API Version"),
+]
+
+SECRET_VARS = {"AZURE_AD_CLIENT_SECRET", "AZURE_OPENAI_API_KEY"}
+
+
+class SettingsState(State):
+    config_items: list[list[str]] = []
+    connection_result: str = ""
+    connection_success: bool = False
+    is_testing_connection: bool = False
+    test_agent_message: str = ""
+    test_agent_response: str = ""
+
+    def set_test_agent_message(self, value: str) -> None:
+        self.test_agent_message = value
+    is_testing_agent: bool = False
+    guide_open: bool = False
+
+    def load_config(self) -> None:
+        items = []
+        for var_name, label in ENV_VARS:
+            value = os.getenv(var_name, "")
+            if var_name in SECRET_VARS and value:
+                display = value[:4] + "..." + value[-4:] if len(value) > 8 else "****"
+            elif not value:
+                display = "(not set)"
+            else:
+                display = value
+            items.append([label, display, "set" if value else "missing"])
+        self.config_items = items
+
+    def test_connection(self) -> None:
+        from dotenv import load_dotenv
+        load_dotenv(override=True)
+
+        self.is_testing_connection = True
+        self.connection_result = ""
+        yield
+        try:
+            from auth import test_connection
+
+            result = test_connection()
+            self.connection_success = result["success"]
+            self.connection_result = result["message"]
+        except Exception as e:
+            self.connection_success = False
+            self.connection_result = f"Error: {e}"
+        finally:
+            self.is_testing_connection = False
+
+    def send_test_message(self) -> None:
+        if not self.test_agent_message.strip():
+            return
+
+        from dotenv import load_dotenv
+        load_dotenv(override=True)
+
+        self.is_testing_agent = True
+        self.test_agent_response = ""
+        yield
+        try:
+            from d2e_client import test_agent
+
+            self.test_agent_response = test_agent(self.test_agent_message)
+        except Exception as e:
+            self.test_agent_response = f"Error: {e}"
+        finally:
+            self.is_testing_agent = False
+
+    def toggle_guide(self) -> None:
+        self.guide_open = not self.guide_open
+
+
+def config_table() -> rx.Component:
+    return rx.table.root(
+        rx.table.header(
+            rx.table.row(
+                rx.table.column_header_cell("Setting"),
+                rx.table.column_header_cell("Value"),
+                rx.table.column_header_cell("Status"),
+            ),
+        ),
+        rx.table.body(
+            rx.foreach(
+                SettingsState.config_items,
+                lambda item: rx.table.row(
+                    rx.table.cell(rx.text(item[0], weight="medium")),
+                    rx.table.cell(rx.code(item[1])),
+                    rx.table.cell(
+                        rx.cond(
+                            item[2] == "set",
+                            rx.badge("Set", color_scheme="green"),
+                            rx.badge("Missing", color_scheme="red"),
+                        )
+                    ),
+                ),
+            ),
+        ),
+        width="100%",
+    )
+
+
+def connection_test_section() -> rx.Component:
+    return rx.card(
+        rx.vstack(
+            rx.text(
+                "Connection Test",
+                size="3",
+                weight="bold",
+                letter_spacing="-0.01em",
+            ),
+            rx.text(
+                "Validate Azure AD credentials and Power Platform token.",
+                size="2",
+                color_scheme="gray",
+            ),
+            rx.button(
+                rx.cond(
+                    SettingsState.is_testing_connection,
+                    rx.hstack(
+                        rx.spinner(size="1"),
+                        rx.text("Testing..."),
+                        align="center",
+                        spacing="2",
+                    ),
+                    rx.text("Test Connection"),
+                ),
+                on_click=SettingsState.test_connection,
+                disabled=SettingsState.is_testing_connection,
+                size="2",
+            ),
+            rx.cond(
+                SettingsState.connection_result != "",
+                rx.callout(
+                    SettingsState.connection_result,
+                    icon=rx.cond(SettingsState.connection_success, "check", "triangle_alert"),
+                    color_scheme=rx.cond(SettingsState.connection_success, "green", "red"),
+                    width="100%",
+                ),
+            ),
+            spacing="3",
+            width="100%",
+        ),
+        width="100%",
+    )
+
+
+def test_agent_section() -> rx.Component:
+    return rx.card(
+        rx.vstack(
+            rx.text(
+                "Test Agent",
+                size="3",
+                weight="bold",
+                letter_spacing="-0.01em",
+            ),
+            rx.text(
+                "Send a quick test message to the Copilot Studio agent.",
+                size="2",
+                color_scheme="gray",
+            ),
+            rx.hstack(
+                rx.input(
+                    placeholder="Type a test message...",
+                    value=SettingsState.test_agent_message,
+                    on_change=SettingsState.set_test_agent_message,
+                    width="100%",
+                ),
+                rx.button(
+                    rx.cond(
+                        SettingsState.is_testing_agent,
+                        rx.hstack(
+                            rx.spinner(size="1"),
+                            rx.text("Sending..."),
+                            align="center",
+                            spacing="2",
+                        ),
+                        rx.text("Send"),
+                    ),
+                    on_click=SettingsState.send_test_message,
+                    disabled=SettingsState.is_testing_agent,
+                    size="2",
+                ),
+                width="100%",
+                align="end",
+            ),
+            rx.cond(
+                SettingsState.test_agent_response != "",
+                rx.box(
+                    rx.text("Agent Response:", size="1", weight="medium", color_scheme="gray"),
+                    rx.code_block(SettingsState.test_agent_response, language="log", width="100%"),
+                    width="100%",
+                ),
+            ),
+            spacing="3",
+            width="100%",
+        ),
+        width="100%",
+    )
+
+
+def app_registration_guide() -> rx.Component:
+    return rx.card(
+        rx.vstack(
+            rx.hstack(
+                rx.text(
+                    "App Registration Guide",
+                    size="3",
+                    weight="bold",
+                    letter_spacing="-0.01em",
+                ),
+                rx.spacer(),
+                rx.button(
+                    rx.cond(SettingsState.guide_open, "Hide", "Show"),
+                    variant="ghost",
+                    size="2",
+                    on_click=SettingsState.toggle_guide,
+                ),
+                width="100%",
+                align="center",
+            ),
+            rx.cond(
+                SettingsState.guide_open,
+                rx.vstack(
+                    rx.separator(),
+                    _guide_step(
+                        "1",
+                        "Create App Registration",
+                        "Azure Portal > AAD > App Registrations > New. "
+                        "Name: 'Copilot Studio Eval'. Single tenant.",
+                    ),
+                    _guide_step(
+                        "2",
+                        "Note the IDs",
+                        "Copy the Application (client) ID → AZURE_AD_CLIENT_ID. "
+                        "Copy the Directory (tenant) ID → AZURE_AD_TENANT_ID.",
+                    ),
+                    _guide_step(
+                        "3",
+                        "Create Client Secret",
+                        "Go to Certificates & secrets > New client secret. "
+                        "Copy the Value → AZURE_AD_CLIENT_SECRET.",
+                    ),
+                    _guide_step(
+                        "4",
+                        "Add API Permissions",
+                        "Go to API permissions > Add a permission > APIs my organization uses > "
+                        "Search 'Power Platform API' > Delegated permissions > user_impersonation. "
+                        "Grant admin consent.",
+                    ),
+                    _guide_step(
+                        "5",
+                        "Enable D2E on Agent",
+                        "In Copilot Studio, open your agent > Settings > Security > "
+                        "Enable Direct-to-Engine. Note the Environment ID and Agent Identifier.",
+                    ),
+                    spacing="3",
+                    width="100%",
+                ),
+            ),
+            spacing="3",
+            width="100%",
+        ),
+        width="100%",
+    )
+
+
+def _guide_step(number: str, title: str, description: str) -> rx.Component:
+    return rx.hstack(
+        rx.badge(
+            number, variant="solid", size="2", color_scheme="teal"
+        ),
+        rx.vstack(
+            rx.text(title, weight="bold", size="2"),
+            rx.text(description, size="2", color_scheme="gray"),
+            spacing="1",
+        ),
+        spacing="3",
+        align="start",
+        width="100%",
+    )
+
+
+@rx.page(route="/settings", title="Settings", on_load=SettingsState.load_config)
+def settings_page() -> rx.Component:
+    return layout(
+        rx.vstack(
+            page_header("Settings", "Copilot Studio D2E configuration and connection testing"),
+            config_table(),
+            connection_test_section(),
+            test_agent_section(),
+            app_registration_guide(),
+            spacing="5",
+            width="100%",
+            max_width="900px",
+        ),
+    )

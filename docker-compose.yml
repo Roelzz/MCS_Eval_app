@@ -1,0 +1,23 @@
+services:
+  app:
+    build: .
+    container_name: evals-app
+    ports:
+      - "2009:2009"
+    env_file:
+      - .env
+    environment:
+      - REFLEX_ENV=prod
+      - PORT=2009
+    networks:
+      - evals_network
+    volumes:
+      - evals_data:/app/data
+    restart: unless-stopped
+
+networks:
+  evals_network:
+    driver: bridge
+
+volumes:
+  evals_data:
