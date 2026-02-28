@@ -43,6 +43,7 @@ class RunState(State):
     selected_metrics: list[str] = ["answer_relevancy"]
     threshold: float = 0.5
     delay_seconds: float = 1.0
+    max_concurrent: int = 3
     create_error: str = ""
 
     def load_runs(self) -> None:
@@ -88,6 +89,7 @@ class RunState(State):
         self.selected_metrics = ["answer_relevancy"]
         self.threshold = 0.5
         self.delay_seconds = 1.0
+        self.max_concurrent = 3
         self.create_error = ""
 
     def close_create_dialog(self) -> None:
@@ -110,6 +112,12 @@ class RunState(State):
             self.delay_seconds = float(value) if value else 1.0
         except ValueError:
             self.delay_seconds = 1.0
+
+    def set_max_concurrent_value(self, value: str) -> None:
+        try:
+            self.max_concurrent = max(1, int(value)) if value else 3
+        except ValueError:
+            self.max_concurrent = 3
 
     def toggle_metric(self, metric: str) -> None:
         if metric in self.selected_metrics:
@@ -168,6 +176,7 @@ class RunState(State):
                 config_json=json.dumps({
                     "threshold": self.threshold,
                     "delay_seconds": self.delay_seconds,
+                    "max_concurrent": self.max_concurrent,
                 }),
                 total_cases=dataset.num_cases,
                 created_at=datetime.utcnow(),
@@ -208,81 +217,91 @@ class RunState(State):
                 config = json.loads(run.config_json)
                 threshold = config.get("threshold", 0.5)
                 delay = config.get("delay_seconds", 1.0)
+                max_concurrent = config.get("max_concurrent", 1)
 
         all_scores: list[float] = []
+        sem = asyncio.Semaphore(max_concurrent)
 
+        async def process_case(idx: int, case: dict) -> None:
+            async with sem:
+                try:
+                    turns = case.get("turns", [])
+                    expected = case.get("expected_output", "")
+                    context = case.get("context", "")
+                    expected_topic = case.get("expected_topic", "")
+                    keywords_any = case.get("keywords_any", [])
+                    keywords_all = case.get("keywords_all", [])
+
+                    start = time.time()
+                    conversation, activities = await run_conversation(turns)
+                    actual_output = conversation[-1]["content"] if conversation else ""
+                    duration = time.time() - start
+
+                    scores = await evaluate_case(
+                        turns=turns,
+                        conversation=conversation,
+                        expected_output=expected,
+                        context=context,
+                        metric_names=metrics,
+                        threshold=threshold,
+                        activities=activities,
+                        expected_topic=expected_topic,
+                        keywords_any=keywords_any,
+                        keywords_all=keywords_all,
+                    )
+
+                    avg_case_score = (
+                        sum(s.get("score", 0) for s in scores.values()) / len(scores)
+                        if scores else 0
+                    )
+                    passed = avg_case_score >= threshold
+
+                    async with self:
+                        all_scores.append(avg_case_score)
+                        with rx.session() as session:
+                            result = EvalResult(
+                                eval_run_id=run_id,
+                                test_case_index=idx,
+                                input_json=json.dumps(turns),
+                                actual_output=actual_output,
+                                expected_output=expected,
+                                scores_json=json.dumps(scores),
+                                activities_json=json.dumps(activities, default=str),
+                                passed=passed,
+                                duration_seconds=round(duration, 2),
+                            )
+                            session.add(result)
+                            run = session.get(EvalRun, run_id)
+                            run.completed_cases += 1
+                            session.add(run)
+                            session.commit()
+
+                except Exception as e:
+                    async with self:
+                        with rx.session() as session:
+                            result = EvalResult(
+                                eval_run_id=run_id,
+                                test_case_index=idx,
+                                input_json=json.dumps(case.get("turns", [])),
+                                actual_output=f"Error: {e}",
+                                expected_output=case.get("expected_output", ""),
+                                scores_json="{}",
+                                passed=False,
+                                duration_seconds=0,
+                            )
+                            session.add(result)
+                            run = session.get(EvalRun, run_id)
+                            run.completed_cases += 1
+                            session.add(run)
+                            session.commit()
+
+        tasks = []
         for i, case in enumerate(cases):
-            try:
-                turns = case.get("turns", [])
-                expected = case.get("expected_output", "")
-                context = case.get("context", "")
-                expected_topic = case.get("expected_topic", "")
-                keywords_any = case.get("keywords_any", [])
-                keywords_all = case.get("keywords_all", [])
-
-                start = time.time()
-                conversation, activities = await run_conversation(turns)
-                actual_output = conversation[-1]["content"] if conversation else ""
-                duration = time.time() - start
-
-                scores = await evaluate_case(
-                    turns=turns,
-                    conversation=conversation,
-                    expected_output=expected,
-                    context=context,
-                    metric_names=metrics,
-                    threshold=threshold,
-                    activities=activities,
-                    expected_topic=expected_topic,
-                    keywords_any=keywords_any,
-                    keywords_all=keywords_all,
-                )
-
-                avg_case_score = (
-                    sum(s.get("score", 0) for s in scores.values()) / len(scores)
-                    if scores else 0
-                )
-                passed = avg_case_score >= threshold
-                all_scores.append(avg_case_score)
-
-                async with self:
-                    with rx.session() as session:
-                        result = EvalResult(
-                            eval_run_id=run_id,
-                            test_case_index=i,
-                            input_json=json.dumps(turns),
-                            actual_output=actual_output,
-                            expected_output=expected,
-                            scores_json=json.dumps(scores),
-                            activities_json=json.dumps(activities, default=str),
-                            passed=passed,
-                            duration_seconds=round(duration, 2),
-                        )
-                        session.add(result)
-
-                        run = session.get(EvalRun, run_id)
-                        run.completed_cases = i + 1
-                        session.add(run)
-                        session.commit()
-
-            except Exception as e:
-                async with self:
-                    with rx.session() as session:
-                        result = EvalResult(
-                            eval_run_id=run_id,
-                            test_case_index=i,
-                            input_json=json.dumps(case.get("turns", [])),
-                            actual_output=f"Error: {e}",
-                            expected_output=case.get("expected_output", ""),
-                            scores_json="{}",
-                            passed=False,
-                            duration_seconds=0,
-                        )
-                        session.add(result)
-                        session.commit()
-
+            tasks.append(asyncio.create_task(process_case(i, case)))
             if delay > 0 and i < len(cases) - 1:
                 await asyncio.sleep(delay)
+
+        await asyncio.gather(*tasks, return_exceptions=True)
 
         async with self:
             with rx.session() as session:
@@ -338,7 +357,7 @@ def create_run_dialog() -> rx.Component:
                             width="100%",
                         ),
                         spacing="1",
-                        width="50%",
+                        width="33%",
                     ),
                     rx.vstack(
                         rx.text("Delay (seconds)", size="2", weight="medium"),
@@ -349,7 +368,18 @@ def create_run_dialog() -> rx.Component:
                             width="100%",
                         ),
                         spacing="1",
-                        width="50%",
+                        width="33%",
+                    ),
+                    rx.vstack(
+                        rx.text("Max concurrent", size="2", weight="medium"),
+                        rx.input(
+                            value=RunState.max_concurrent.to(str),
+                            on_change=RunState.set_max_concurrent_value,
+                            type="number",
+                            width="100%",
+                        ),
+                        spacing="1",
+                        width="33%",
                     ),
                     spacing="3",
                     width="100%",
