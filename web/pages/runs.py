@@ -417,6 +417,16 @@ def create_run_dialog() -> rx.Component:
 
 
 
+def _score_cell(avg_score: rx.Var) -> rx.Component:
+    """Score cell with color-coded display."""
+    return rx.text(
+        avg_score,
+        font_family="var(--font-mono)",
+        size="2",
+        weight="medium",
+    )
+
+
 def runs_table() -> rx.Component:
     return rx.table.root(
         rx.table.header(
@@ -426,41 +436,72 @@ def runs_table() -> rx.Component:
                 rx.table.column_header_cell("Progress"),
                 rx.table.column_header_cell("Avg Score"),
                 rx.table.column_header_cell("Created"),
-                rx.table.column_header_cell("Actions"),
+                rx.table.column_header_cell(""),
             ),
         ),
         rx.table.body(
             rx.foreach(
                 RunState.runs,
                 lambda r: rx.table.row(
-                    rx.table.cell(rx.text(r["name"], weight="medium")),
+                    rx.table.cell(
+                        rx.link(
+                            rx.hstack(
+                                rx.text(r["name"], weight="medium", size="2"),
+                                rx.icon(
+                                    "arrow-up-right",
+                                    size=12,
+                                    color="var(--gray-a7)",
+                                ),
+                                spacing="1",
+                                align="center",
+                            ),
+                            href="/runs/" + r["id"].to(str),
+                            underline="none",
+                            class_name="run-name-link",
+                        ),
+                    ),
                     rx.table.cell(status_badge(r["status"])),
                     rx.table.cell(
                         rx.vstack(
-                            rx.progress(value=r["progress_pct"], width="100px"),
-                            rx.text(r["progress"], size="1", color_scheme="gray"),
+                            rx.box(
+                                rx.box(
+                                    width=r["progress_pct"].to(str) + "%",
+                                    height="100%",
+                                    background="var(--accent-9)",
+                                    border_radius="3px",
+                                    transition="width 0.4s ease",
+                                ),
+                                width="90px",
+                                height="6px",
+                                border_radius="3px",
+                                background="var(--gray-a3)",
+                                overflow="hidden",
+                            ),
+                            rx.text(
+                                r["progress"],
+                                size="1",
+                                color="var(--gray-a8)",
+                                font_family="var(--font-mono)",
+                            ),
                             spacing="1",
                         ),
                     ),
-                    rx.table.cell(r["avg_score"]),
-                    rx.table.cell(rx.text(r["created"], size="2", color_scheme="gray")),
+                    rx.table.cell(_score_cell(r["avg_score"])),
                     rx.table.cell(
-                        rx.hstack(
-                            rx.link(
-                                rx.button(
-                                    rx.icon("eye", size=14),
-                                    variant="ghost",
-                                    size="1",
-                                ),
-                                href="/runs/" + r["id"].to(str),
-                            ),
-                            rx.button(
-                                rx.icon("rotate-cw", size=14),
-                                variant="ghost",
-                                size="1",
-                                on_click=RunState.rerun(r["id"]),
-                            ),
-                            spacing="1",
+                        rx.text(
+                            r["created"],
+                            size="1",
+                            color="var(--gray-a8)",
+                            font_family="var(--font-mono)",
+                        ),
+                    ),
+                    rx.table.cell(
+                        rx.button(
+                            rx.icon("rotate-cw", size=14),
+                            variant="ghost",
+                            size="1",
+                            color_scheme="gray",
+                            on_click=RunState.rerun(r["id"]),
                         ),
                     ),
                 ),

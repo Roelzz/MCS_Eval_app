@@ -57,27 +57,28 @@ def sidebar_link(
 def sidebar() -> rx.Component:
     return rx.box(
         rx.vstack(
-            # Logo area
+            # Logo area — rebranded
             rx.hstack(
                 rx.box(
                     rx.icon(
-                        "flask-conical",
+                        "cpu",
                         size=18,
                         color="var(--accent-9)",
                     ),
                     padding="6px",
                     border_radius="var(--radius-2)",
                     background="var(--accent-a3)",
+                    flex_shrink="0",
                 ),
                 rx.vstack(
                     rx.text(
-                        "CS Evals",
+                        "MCS Eval Tool",
                         size="2",
                         weight="bold",
                         letter_spacing="-0.02em",
                     ),
                     rx.text(
-                        "Copilot Studio",
+                        "Microsoft Copilot Studio",
                         size="1",
                         color="var(--gray-a8)",
                     ),
@@ -107,7 +108,7 @@ def sidebar() -> rx.Component:
                 padding="12px 8px",
             ),
             rx.spacer(),
-            # Footer
+            # Footer with theme toggle
             rx.box(
                 height="1px",
                 width="100%",
@@ -117,17 +118,24 @@ def sidebar() -> rx.Component:
                 ),
             ),
             rx.hstack(
-                rx.box(
-                    width="6px",
-                    height="6px",
-                    border_radius="50%",
-                    background="var(--score-green, #34d399)",
-                    flex_shrink="0",
+                rx.hstack(
+                    rx.box(
+                        width="6px",
+                        height="6px",
+                        border_radius="50%",
+                        background="var(--score-green, #34d399)",
+                        flex_shrink="0",
+                    ),
+                    rx.text("Platform v1.0", size="1", color="var(--gray-a7)"),
+                    spacing="2",
+                    align="center",
                 ),
-                rx.text("Platform v1.0", size="1", color="var(--gray-a7)"),
+                rx.spacer(),
+                rx.color_mode.button(size="1", variant="ghost"),
                 spacing="2",
                 align="center",
                 padding="12px 16px",
+                width="100%",
             ),
             spacing="0",
             height="100%",
@@ -135,8 +143,8 @@ def sidebar() -> rx.Component:
         width="240px",
         min_width="240px",
         height="100vh",
-        border_right="1px solid rgba(255, 255, 255, 0.06)",
-        background="rgba(255, 255, 255, 0.01)",
+        border_right="1px solid var(--sidebar-border, rgba(255,255,255,0.06))",
+        background="var(--surface-glass, rgba(255,255,255,0.01))",
     )
 
 
@@ -170,7 +178,7 @@ def layout(page_content: rx.Component) -> rx.Component:
         ),
         spacing="0",
         height="100vh",
-        background="#0a0a0f",
+        background="var(--bg-app, #0a0a0f)",
     )
 
 

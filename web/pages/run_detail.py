@@ -48,11 +48,17 @@ class RunDetailState(State):
                     f"{run_obj.avg_score:.1%}"
                     if run_obj.avg_score > 0 else "—"
                 ),
+                "avg_score_num": run_obj.avg_score,
                 "progress": (
                     f"{run_obj.completed_cases}/{run_obj.total_cases}"
                 ),
-                "error": run_obj.error,
+                "progress_pct": (
+                    round(run_obj.completed_cases / run_obj.total_cases * 100)
+                    if run_obj.total_cases > 0 else 0
+                ),
+                "error": run_obj.error or "",
                 "created": run_obj.created_at.strftime("%d-%m-%Y %H:%M"),
+                "metrics": run_obj.metrics_json or "[]",
             }
 
             result_rows = session.exec(
@@ -67,9 +73,8 @@ class RunDetailState(State):
                     json.loads(r.scores_json) if r.scores_json else {}
                 )
 
-                # Pre-format scores summary: "metric: 85%" badges
-                score_parts = []
-                score_detail_lines = []
+                # Build structured score items for visual rendering
+                score_items = []
                 overall_color = "gray"
                 for mname, data in scores_raw.items():
                     val = (
@@ -81,11 +86,16 @@ class RunDetailState(State):
                         if isinstance(data, dict) else ""
                     )
                     color = _color_for_score(val)
-                    score_parts.append(f"{mname}: {val:.0%}")
-                    detail = f"[{color}] {mname}: {val:.0%}"
-                    if reason:
-                        detail += f"\n  {reason}"
-                    score_detail_lines.append(detail)
+                    pct = round(val * 100)
+                    score_items.append({
+                        "name": mname.replace("_", " ").title(),
+                        "raw": mname,
+                        "val_pct": str(pct),
+                        "val_text": f"{val:.0%}",
+                        "color": color,
+                        "reason": reason,
+                        "bar_width": f"{pct}%",
+                    })
                     if color == "red":
                         overall_color = "red"
                     elif color == "yellow" and overall_color != "red":
@@ -93,21 +103,23 @@ class RunDetailState(State):
                     elif overall_color == "gray":
                         overall_color = "green"
 
-                scores_summary = " | ".join(score_parts)
-                scores_detail = "\n\n".join(score_detail_lines)
+                scores_summary = " · ".join(
+                    f"{it['raw']}: {it['val_text']}"
+                    for it in score_items
+                )
 
-                # Pre-format conversation
+                # Pre-format conversation turns as structured list
                 input_turns = (
                     json.loads(r.input_json) if r.input_json else []
                 )
-                conv_lines = []
+                conv_turns = []
                 for t in input_turns:
-                    role = (
-                        "User" if t.get("role") == "user"
-                        else "Assistant"
-                    )
-                    conv_lines.append(f"{role}: {t.get('content', '')}")
-                conversation_text = "\n\n".join(conv_lines)
+                    role = t.get("role", "user")
+                    conv_turns.append({
+                        "role": "User" if role == "user" else "Assistant",
+                        "content": t.get("content", ""),
+                        "is_user": role == "user",
+                    })
 
                 # Parse tool/non-message activities
                 raw_activities = (
@@ -119,8 +131,8 @@ class RunDetailState(State):
                         "message", "end_of_conversation", "typing", None
                     )
                 ]
+                tool_lines = []
                 if tool_activities:
-                    tool_lines = []
                     for a in tool_activities:
                         atype = a.get("type", "?")
                         aname = a.get("name", "")
@@ -134,45 +146,47 @@ class RunDetailState(State):
                                 f"{d.get('displayName', '?')} ({d.get('toolKind', '?')})"
                                 for d in tool_defs
                             ]
-                            line = f"Plan → Topics: {', '.join(topics)}"
+                            line = f"Plan · Topics: {', '.join(topics)}"
                             if kinds:
-                                line += f"\n  Tools: {', '.join(kinds)}"
+                                line += f"  |  Tools: {', '.join(kinds)}"
+                            tool_lines.append({"icon": "map", "text": line, "color": "blue"})
 
                         elif aname == "DynamicPlanStepTriggered":
                             topic = value.get("taskDialogId", "").rsplit(".", 1)[-1]
                             state = value.get("state", "?")
                             step_type = value.get("type", "?")
-                            line = f"Step → {topic} [{step_type}] (state: {state})"
+                            line = f"Step · {topic} [{step_type}] state: {state}"
+                            tool_lines.append({"icon": "play", "text": line, "color": "teal"})
 
                         elif aname == "DynamicPlanStepBindUpdate":
                             topic = value.get("taskDialogId", "").rsplit(".", 1)[-1]
                             args = value.get("arguments", {})
-                            line = f"Bind → {topic}"
+                            line = f"Bind · {topic}"
                             if args:
-                                line += f" (args: {args})"
+                                line += f"  args: {args}"
+                            tool_lines.append({"icon": "link", "text": line, "color": "purple"})
 
                         else:
                             line = f"[{atype}] {aname}"
                             if value:
-                                line += f"\n  {value}"
+                                line += f"  →  {value}"
+                            tool_lines.append({"icon": "zap", "text": line, "color": "gray"})
 
-                        tool_lines.append(line)
-                    tool_calls_text = "\n".join(tool_lines)
-                else:
-                    tool_calls_text = "No tool activity captured"
+                if not tool_lines:
+                    tool_lines.append({"icon": "minus", "text": "No tool activity captured", "color": "gray"})
 
                 self.results.append({
                     "index": r.test_case_index,
                     "num": str(r.test_case_index + 1),
                     "passed": r.passed,
                     "duration": f"{r.duration_seconds:.1f}s",
-                    "actual_output": r.actual_output,
-                    "expected_output": r.expected_output,
+                    "actual_output": r.actual_output or "",
+                    "expected_output": r.expected_output or "",
                     "scores_summary": scores_summary,
-                    "scores_detail": scores_detail,
+                    "score_items": score_items,
                     "scores_color": overall_color,
-                    "conversation_text": conversation_text,
-                    "tool_calls_text": tool_calls_text,
+                    "conv_turns": conv_turns,
+                    "tool_lines": tool_lines,
                 })
 
         self.expanded_result = -1
@@ -227,117 +241,304 @@ class RunDetailState(State):
         )
 
 
+def _score_bar(item: rx.Var) -> rx.Component:
+    """Visual score bar row for a single metric."""
+    color_map = {
+        "green": "#34d399",
+        "yellow": "#fbbf24",
+        "red": "#f87171",
+        "gray": "#94a3b8",
+    }
+    return rx.vstack(
+        rx.hstack(
+            rx.text(
+                item["name"].to(str),
+                size="1",
+                color="var(--gray-a10)",
+                weight="medium",
+                min_width="160px",
+            ),
+            rx.box(
+                rx.box(
+                    width=item["bar_width"].to(str),
+                    height="100%",
+                    background=rx.cond(
+                        item["color"] == "green", "#34d399",
+                        rx.cond(
+                            item["color"] == "yellow", "#fbbf24",
+                            rx.cond(
+                                item["color"] == "red", "#f87171",
+                                "#94a3b8",
+                            ),
+                        ),
+                    ),
+                    border_radius="3px",
+                    transition="width 0.4s ease",
+                ),
+                flex="1",
+                height="8px",
+                border_radius="4px",
+                background="var(--gray-a3)",
+                overflow="hidden",
+            ),
+            rx.text(
+                item["val_text"].to(str),
+                size="1",
+                font_family="var(--font-mono)",
+                weight="bold",
+                color=rx.cond(
+                    item["color"] == "green", "#34d399",
+                    rx.cond(
+                        item["color"] == "yellow", "#fbbf24",
+                        rx.cond(
+                            item["color"] == "red", "#f87171",
+                            "var(--gray-a9)",
+                        ),
+                    ),
+                ),
+                min_width="40px",
+                text_align="right",
+            ),
+            spacing="3",
+            align="center",
+            width="100%",
+        ),
+        rx.cond(
+            item["reason"].to(str) != "",
+            rx.text(
+                item["reason"].to(str),
+                size="1",
+                color="var(--gray-a8)",
+                padding_left="164px",
+                font_style="italic",
+            ),
+        ),
+        spacing="1",
+        width="100%",
+    )
+
+
+def _chat_turn(turn: rx.Var) -> rx.Component:
+    """Single chat bubble for conversation display."""
+    return rx.cond(
+        turn["is_user"],
+        rx.hstack(
+            rx.spacer(),
+            rx.box(
+                rx.text(
+                    turn["content"].to(str),
+                    size="2",
+                    white_space="pre-wrap",
+                ),
+                padding="10px 14px",
+                background="var(--accent-a3)",
+                border="1px solid var(--accent-a5)",
+                border_radius="12px 12px 4px 12px",
+                max_width="75%",
+            ),
+            width="100%",
+            spacing="2",
+        ),
+        rx.hstack(
+            rx.box(
+                rx.icon("bot", size=14, color="var(--gray-a8)"),
+                padding="4px",
+                border_radius="50%",
+                background="var(--gray-a3)",
+                flex_shrink="0",
+                align_self="flex-start",
+                margin_top="2px",
+            ),
+            rx.box(
+                rx.text(
+                    turn["content"].to(str),
+                    size="2",
+                    white_space="pre-wrap",
+                ),
+                padding="10px 14px",
+                background="var(--gray-a2)",
+                border="1px solid var(--gray-a4)",
+                border_radius="4px 12px 12px 12px",
+                max_width="75%",
+            ),
+            width="100%",
+            spacing="2",
+        ),
+    )
+
+
+def _tool_line(item: rx.Var) -> rx.Component:
+    """Single tool activity line."""
+    return rx.hstack(
+        rx.box(
+            rx.icon(
+                item["icon"].to(str),
+                size=12,
+                color=rx.cond(
+                    item["color"] == "blue", "var(--blue-9)",
+                    rx.cond(
+                        item["color"] == "teal", "var(--teal-9)",
+                        rx.cond(
+                            item["color"] == "purple", "var(--purple-9)",
+                            "var(--gray-a7)",
+                        ),
+                    ),
+                ),
+            ),
+            padding="4px",
+            border_radius="4px",
+            background=rx.cond(
+                item["color"] == "blue", "var(--blue-a3)",
+                rx.cond(
+                    item["color"] == "teal", "var(--teal-a3)",
+                    rx.cond(
+                        item["color"] == "purple", "var(--purple-a3)",
+                        "var(--gray-a2)",
+                    ),
+                ),
+            ),
+            flex_shrink="0",
+        ),
+        rx.text(
+            item["text"].to(str),
+            size="1",
+            font_family="var(--font-mono)",
+            white_space="pre-wrap",
+            color="var(--gray-a10)",
+        ),
+        spacing="2",
+        align="start",
+        width="100%",
+    )
+
+
 def _expanded_content(r: rx.Var) -> rx.Component:
     return rx.vstack(
-        rx.separator(),
+        rx.separator(margin_top="4px", margin_bottom="8px"),
         # Conversation
         rx.cond(
-            r["conversation_text"].to(str) != "",
+            r["conv_turns"].length() > 0,
             rx.vstack(
-                rx.text("Conversation", size="2", weight="medium"),
-                rx.box(
-                    rx.text(
-                        r["conversation_text"].to(str),
-                        size="2",
-                        white_space="pre-wrap",
-                    ),
-                    padding="12px",
-                    border_radius="var(--radius-2)",
-                    background="var(--gray-a2)",
+                rx.hstack(
+                    rx.icon("message-circle", size=14, color="var(--accent-9)"),
+                    rx.text("Conversation", size="2", weight="semibold"),
+                    spacing="2",
+                    align="center",
+                ),
+                rx.vstack(
+                    rx.foreach(r["conv_turns"], _chat_turn),
+                    spacing="2",
                     width="100%",
+                    padding="12px",
+                    border_radius="var(--radius-3)",
+                    background="var(--gray-a1)",
+                    border="1px solid var(--gray-a3)",
                 ),
                 spacing="2",
                 width="100%",
             ),
         ),
-        # Expected vs Actual side-by-side
+        # Expected vs Actual
         rx.cond(
             r["expected_output"].to(str) != "",
             rx.hstack(
                 rx.vstack(
-                    rx.text(
-                        "Expected Output",
-                        size="1",
-                        weight="medium",
-                        color_scheme="gray",
+                    rx.hstack(
+                        rx.icon("target", size=13, color="var(--gray-a8)"),
+                        rx.text("Expected", size="1", weight="medium", color="var(--gray-a9)"),
+                        spacing="1",
+                        align="center",
                     ),
                     rx.box(
                         rx.text(
                             r["expected_output"].to(str),
                             size="2",
+                            white_space="pre-wrap",
+                            color="var(--gray-a11)",
                         ),
-                        padding="8px",
+                        padding="10px 12px",
                         border_radius="var(--radius-2)",
                         background="var(--gray-a2)",
+                        border="1px solid var(--gray-a3)",
                         width="100%",
                     ),
-                    spacing="1",
+                    spacing="2",
                     flex="1",
                 ),
                 rx.vstack(
-                    rx.text(
-                        "Actual Output",
-                        size="1",
-                        weight="medium",
-                        color_scheme="gray",
+                    rx.hstack(
+                        rx.icon("message-square", size=13, color="var(--accent-a9)"),
+                        rx.text("Actual", size="1", weight="medium", color="var(--gray-a9)"),
+                        spacing="1",
+                        align="center",
                     ),
                     rx.box(
                         rx.text(
                             r["actual_output"].to(str),
                             size="2",
+                            white_space="pre-wrap",
+                            color="var(--gray-a11)",
                         ),
-                        padding="8px",
+                        padding="10px 12px",
                         border_radius="var(--radius-2)",
-                        background="var(--gray-a2)",
+                        background="var(--accent-a2)",
+                        border="1px solid var(--accent-a4)",
                         width="100%",
                     ),
-                    spacing="1",
+                    spacing="2",
                     flex="1",
                 ),
                 spacing="3",
                 width="100%",
+                align="start",
             ),
         ),
-        # Per-metric scores detail
+        # Metric scores as visual bars
         rx.cond(
-            r["scores_detail"].to(str) != "",
+            r["score_items"].length() > 0,
             rx.vstack(
-                rx.text("Metric Scores", size="2", weight="medium"),
-                rx.box(
-                    rx.text(
-                        r["scores_detail"].to(str),
-                        size="2",
-                        white_space="pre-wrap",
-                    ),
-                    padding="12px",
-                    border_radius="var(--radius-2)",
-                    background="var(--gray-a2)",
+                rx.hstack(
+                    rx.icon("bar-chart-2", size=14, color="var(--accent-9)"),
+                    rx.text("Metric Scores", size="2", weight="semibold"),
+                    spacing="2",
+                    align="center",
+                ),
+                rx.vstack(
+                    rx.foreach(r["score_items"], _score_bar),
+                    spacing="3",
                     width="100%",
+                    padding="14px 16px",
+                    border_radius="var(--radius-3)",
+                    background="var(--gray-a1)",
+                    border="1px solid var(--gray-a3)",
                 ),
                 spacing="2",
                 width="100%",
             ),
         ),
-        # Tool Calls
+        # Tool activity
         rx.vstack(
-            rx.text("Tool Calls", size="2", weight="medium"),
-            rx.box(
-                rx.text(
-                    r["tool_calls_text"].to(str),
-                    size="2",
-                    white_space="pre-wrap",
-                ),
-                padding="12px",
-                border_radius="var(--radius-2)",
-                background="var(--gray-a2)",
+            rx.hstack(
+                rx.icon("zap", size=14, color="var(--accent-9)"),
+                rx.text("Tool Activity", size="2", weight="semibold"),
+                spacing="2",
+                align="center",
+            ),
+            rx.vstack(
+                rx.foreach(r["tool_lines"], _tool_line),
+                spacing="2",
                 width="100%",
+                padding="12px 14px",
+                border_radius="var(--radius-3)",
+                background="var(--gray-a1)",
+                border="1px solid var(--gray-a3)",
             ),
             spacing="2",
             width="100%",
         ),
-        spacing="3",
+        spacing="4",
         width="100%",
-        padding_top="8px",
+        padding_top="4px",
     )
 
 
@@ -345,29 +546,56 @@ def _result_row(r: rx.Var) -> rx.Component:
     return rx.card(
         rx.vstack(
             rx.hstack(
-                rx.text(
-                    r["num"].to(str),
-                    size="2",
-                    weight="medium",
-                    min_width="30px",
+                # Case number badge
+                rx.badge(
+                    "#" + r["num"].to(str),
+                    variant="soft",
+                    color_scheme="gray",
+                    size="1",
+                    font_family="var(--font-mono)",
                 ),
+                # Pass/Fail
                 rx.cond(
                     r["passed"],
-                    rx.badge("Pass", color_scheme="green", size="1"),
-                    rx.badge("Fail", color_scheme="red", size="1"),
+                    rx.hstack(
+                        rx.icon("check-circle", size=13, color="#34d399"),
+                        rx.text("Pass", size="1", color="#34d399", weight="medium"),
+                        spacing="1",
+                        align="center",
+                    ),
+                    rx.hstack(
+                        rx.icon("x-circle", size=13, color="#f87171"),
+                        rx.text("Fail", size="1", color="#f87171", weight="medium"),
+                        spacing="1",
+                        align="center",
+                    ),
                 ),
-                rx.badge(
+                # Scores summary (truncated)
+                rx.text(
                     r["scores_summary"].to(str),
-                    color_scheme=r["scores_color"].to(str),
-                    variant="soft",
                     size="1",
+                    color="var(--gray-a8)",
+                    font_family="var(--font-mono)",
+                    overflow="hidden",
+                    text_overflow="ellipsis",
+                    white_space="nowrap",
+                    flex="1",
+                    max_width="400px",
                 ),
                 rx.spacer(),
-                rx.text(
-                    r["duration"].to(str),
-                    size="1",
-                    color_scheme="gray",
+                # Duration
+                rx.hstack(
+                    rx.icon("clock", size=12, color="var(--gray-a6)"),
+                    rx.text(
+                        r["duration"].to(str),
+                        size="1",
+                        color="var(--gray-a7)",
+                        font_family="var(--font-mono)",
+                    ),
+                    spacing="1",
+                    align="center",
                 ),
+                # Expand toggle
                 rx.button(
                     rx.cond(
                         RunDetailState.expanded_result == r["index"],
@@ -376,13 +604,12 @@ def _result_row(r: rx.Var) -> rx.Component:
                     ),
                     variant="ghost",
                     size="1",
-                    on_click=RunDetailState.toggle_result(
-                        r["index"]
-                    ),
+                    color_scheme="gray",
+                    on_click=RunDetailState.toggle_result(r["index"]),
                 ),
                 align="center",
                 width="100%",
-                spacing="2",
+                spacing="3",
             ),
             rx.cond(
                 RunDetailState.expanded_result == r["index"],
@@ -395,26 +622,111 @@ def _result_row(r: rx.Var) -> rx.Component:
     )
 
 
+def _score_summary_card() -> rx.Component:
+    """Run-level score summary with big stat + progress bar."""
+    return rx.card(
+        rx.hstack(
+            rx.vstack(
+                rx.text(
+                    RunDetailState.run["avg_score"],
+                    size="8",
+                    weight="bold",
+                    letter_spacing="-0.04em",
+                    font_family="var(--font-mono)",
+                    color="var(--accent-9)",
+                ),
+                rx.text(
+                    "Average Score",
+                    size="1",
+                    color="var(--gray-a8)",
+                    weight="medium",
+                    text_transform="uppercase",
+                    letter_spacing="0.05em",
+                ),
+                spacing="1",
+                align="start",
+            ),
+            rx.separator(orientation="vertical", size="3"),
+            rx.vstack(
+                rx.hstack(
+                    rx.text("Progress", size="1", color="var(--gray-a8)", weight="medium"),
+                    rx.spacer(),
+                    rx.text(
+                        RunDetailState.run["progress"],
+                        size="1",
+                        color="var(--gray-a9)",
+                        font_family="var(--font-mono)",
+                    ),
+                    width="160px",
+                ),
+                rx.box(
+                    rx.box(
+                        width=RunDetailState.run["progress_pct"].to(str) + "%",
+                        height="100%",
+                        background="var(--accent-9)",
+                        border_radius="4px",
+                        transition="width 0.4s ease",
+                    ),
+                    width="160px",
+                    height="8px",
+                    border_radius="4px",
+                    background="var(--gray-a3)",
+                    overflow="hidden",
+                ),
+                spacing="2",
+            ),
+            rx.separator(orientation="vertical", size="3"),
+            rx.vstack(
+                rx.text("Dataset", size="1", color="var(--gray-a8)", weight="medium"),
+                rx.text(RunDetailState.dataset_name, size="2", weight="medium"),
+                spacing="1",
+            ),
+            rx.separator(orientation="vertical", size="3"),
+            rx.vstack(
+                rx.text("Created", size="1", color="var(--gray-a8)", weight="medium"),
+                rx.text(
+                    RunDetailState.run["created"],
+                    size="2",
+                    weight="medium",
+                    font_family="var(--font-mono)",
+                ),
+                spacing="1",
+            ),
+            spacing="5",
+            align="center",
+            padding="4px 0",
+        ),
+        width="100%",
+    )
+
+
 def _header_section() -> rx.Component:
     return rx.vstack(
         rx.link(
             rx.hstack(
-                rx.icon("arrow-left", size=16),
+                rx.icon("arrow-left", size=14),
                 rx.text("Eval Runs", size="2"),
                 spacing="1",
                 align="center",
             ),
             href="/runs",
             underline="none",
+            color="var(--gray-a9)",
+            _hover={"color": "var(--gray-a11)"},
         ),
         rx.hstack(
-            rx.heading(RunDetailState.run["name"], size="6"),
-            status_badge(RunDetailState.run["status"]),
+            rx.hstack(
+                rx.heading(RunDetailState.run["name"], size="6", letter_spacing="-0.02em"),
+                status_badge(RunDetailState.run["status"]),
+                spacing="3",
+                align="center",
+            ),
             rx.spacer(),
             rx.button(
                 rx.icon("rotate-cw", size=14),
                 "Rerun",
                 variant="soft",
+                color_scheme="gray",
                 size="1",
                 on_click=RunDetailState.rerun,
             ),
@@ -422,54 +734,12 @@ def _header_section() -> rx.Component:
                 rx.icon("download", size=14),
                 "Export JSON",
                 variant="soft",
+                color_scheme="gray",
                 size="1",
                 on_click=RunDetailState.export_results,
             ),
             align="center",
             width="100%",
-        ),
-        rx.hstack(
-            rx.vstack(
-                rx.text("Dataset", size="1", color_scheme="gray"),
-                rx.text(
-                    RunDetailState.dataset_name,
-                    size="2",
-                    weight="medium",
-                ),
-                spacing="0",
-            ),
-            rx.separator(orientation="vertical", size="2"),
-            rx.vstack(
-                rx.text("Avg Score", size="1", color_scheme="gray"),
-                rx.text(
-                    RunDetailState.run["avg_score"],
-                    size="2",
-                    weight="medium",
-                ),
-                spacing="0",
-            ),
-            rx.separator(orientation="vertical", size="2"),
-            rx.vstack(
-                rx.text("Progress", size="1", color_scheme="gray"),
-                rx.text(
-                    RunDetailState.run["progress"],
-                    size="2",
-                    weight="medium",
-                ),
-                spacing="0",
-            ),
-            rx.separator(orientation="vertical", size="2"),
-            rx.vstack(
-                rx.text("Created", size="1", color_scheme="gray"),
-                rx.text(
-                    RunDetailState.run["created"],
-                    size="2",
-                    weight="medium",
-                ),
-                spacing="0",
-            ),
-            spacing="4",
-            align="center",
         ),
         rx.cond(
             RunDetailState.run["error"].to(str) != "",
@@ -480,6 +750,7 @@ def _header_section() -> rx.Component:
                 width="100%",
             ),
         ),
+        _score_summary_card(),
         spacing="3",
         width="100%",
         padding_bottom="8px",
@@ -488,12 +759,25 @@ def _header_section() -> rx.Component:
 
 def _results_section() -> rx.Component:
     return rx.vstack(
-        rx.text(
-            "Results (",
-            RunDetailState.results.length().to(str),
-            ")",
-            size="3",
-            weight="medium",
+        rx.hstack(
+            rx.hstack(
+                rx.icon("list", size=16, color="var(--accent-9)"),
+                rx.text(
+                    "Results",
+                    size="3",
+                    weight="semibold",
+                ),
+                rx.badge(
+                    RunDetailState.results.length().to(str),
+                    variant="soft",
+                    color_scheme="gray",
+                    size="1",
+                ),
+                spacing="2",
+                align="center",
+            ),
+            rx.spacer(),
+            width="100%",
         ),
         rx.cond(
             RunDetailState.results.length() > 0,
@@ -503,12 +787,17 @@ def _results_section() -> rx.Component:
                 width="100%",
             ),
             rx.center(
-                rx.text(
-                    "No results yet.",
-                    size="2",
-                    color_scheme="gray",
+                rx.vstack(
+                    rx.icon("inbox", size=28, color="var(--gray-a5)"),
+                    rx.text(
+                        "No results yet.",
+                        size="2",
+                        color="var(--gray-a7)",
+                    ),
+                    align="center",
+                    spacing="3",
                 ),
-                padding="40px 0",
+                padding="60px 0",
                 width="100%",
             ),
         ),
