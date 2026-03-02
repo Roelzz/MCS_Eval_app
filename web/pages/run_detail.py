@@ -1,5 +1,6 @@
 """Run detail page — full results view with expandable rows."""
 
+import asyncio
 import json
 from datetime import datetime
 
@@ -24,14 +25,10 @@ class RunDetailState(State):
     results: list[dict] = []
     expanded_result: int = -1
     dataset_name: str = ""
+    is_live: bool = False
 
-    def load_run(self) -> None:
-        run_id_str = self.router.page.params.get("run_id", "0")
-        try:
-            run_id = int(run_id_str)
-        except (ValueError, TypeError):
-            return
-
+    def _load_run_data(self, run_id: int) -> None:
+        """Load run + results from DB into state. Does not touch is_live."""
         with rx.session() as session:
             run_obj = session.get(EvalRun, run_id)
             if not run_obj:
@@ -44,13 +41,8 @@ class RunDetailState(State):
                 "id": run_obj.id,
                 "name": run_obj.name,
                 "status": run_obj.status,
-                "avg_score": (
-                    f"{run_obj.avg_score:.1%}"
-                    if run_obj.avg_score > 0 else "—"
-                ),
-                "progress": (
-                    f"{run_obj.completed_cases}/{run_obj.total_cases}"
-                ),
+                "avg_score": (f"{run_obj.avg_score:.1%}" if run_obj.avg_score > 0 else "—"),
+                "progress": (f"{run_obj.completed_cases}/{run_obj.total_cases}"),
                 "error": run_obj.error,
                 "created": run_obj.created_at.strftime("%d-%m-%Y %H:%M"),
             }
@@ -63,23 +55,14 @@ class RunDetailState(State):
 
             self.results = []
             for r in result_rows:
-                scores_raw = (
-                    json.loads(r.scores_json) if r.scores_json else {}
-                )
+                scores_raw = json.loads(r.scores_json) if r.scores_json else {}
 
-                # Pre-format scores summary: "metric: 85%" badges
                 score_parts = []
                 score_detail_lines = []
                 overall_color = "gray"
                 for mname, data in scores_raw.items():
-                    val = (
-                        data.get("score", 0)
-                        if isinstance(data, dict) else 0
-                    )
-                    reason = (
-                        data.get("reason", "")
-                        if isinstance(data, dict) else ""
-                    )
+                    val = data.get("score", 0) if isinstance(data, dict) else 0
+                    reason = data.get("reason", "") if isinstance(data, dict) else ""
                     color = _color_for_score(val)
                     score_parts.append(f"{mname}: {val:.0%}")
                     detail = f"[{color}] {mname}: {val:.0%}"
@@ -96,28 +79,18 @@ class RunDetailState(State):
                 scores_summary = " | ".join(score_parts)
                 scores_detail = "\n\n".join(score_detail_lines)
 
-                # Pre-format conversation
-                input_turns = (
-                    json.loads(r.input_json) if r.input_json else []
-                )
+                input_turns = json.loads(r.input_json) if r.input_json else []
                 conv_lines = []
                 for t in input_turns:
-                    role = (
-                        "User" if t.get("role") == "user"
-                        else "Assistant"
-                    )
+                    role = "User" if t.get("role") == "user" else "Assistant"
                     conv_lines.append(f"{role}: {t.get('content', '')}")
                 conversation_text = "\n\n".join(conv_lines)
 
-                # Parse tool/non-message activities
-                raw_activities = (
-                    json.loads(r.activities_json) if r.activities_json else []
-                )
+                raw_activities = json.loads(r.activities_json) if r.activities_json else []
                 tool_activities = [
-                    a for a in raw_activities
-                    if a.get("type") not in (
-                        "message", "end_of_conversation", "typing", None
-                    )
+                    a
+                    for a in raw_activities
+                    if a.get("type") not in ("message", "end_of_conversation", "typing", None)
                 ]
                 if tool_activities:
                     tool_lines = []
@@ -161,21 +134,47 @@ class RunDetailState(State):
                 else:
                     tool_calls_text = "No tool activity captured"
 
-                self.results.append({
-                    "index": r.test_case_index,
-                    "num": str(r.test_case_index + 1),
-                    "passed": r.passed,
-                    "duration": f"{r.duration_seconds:.1f}s",
-                    "actual_output": r.actual_output,
-                    "expected_output": r.expected_output,
-                    "scores_summary": scores_summary,
-                    "scores_detail": scores_detail,
-                    "scores_color": overall_color,
-                    "conversation_text": conversation_text,
-                    "tool_calls_text": tool_calls_text,
-                })
+                self.results.append(
+                    {
+                        "index": r.test_case_index,
+                        "num": str(r.test_case_index + 1),
+                        "passed": r.passed,
+                        "duration": f"{r.duration_seconds:.1f}s",
+                        "actual_output": r.actual_output,
+                        "expected_output": r.expected_output,
+                        "scores_summary": scores_summary,
+                        "scores_detail": scores_detail,
+                        "scores_color": overall_color,
+                        "conversation_text": conversation_text,
+                        "tool_calls_text": tool_calls_text,
+                    }
+                )
 
-        self.expanded_result = -1
+            self.expanded_result = -1
+
+    def load_run(self) -> None:
+        run_id_str = self.router.page.params.get("run_id", "0")
+        try:
+            run_id = int(run_id_str)
+        except (ValueError, TypeError):
+            return
+
+        self._load_run_data(run_id)
+
+        if self.run.get("status") == "running" and not self.is_live:
+            self.is_live = True
+            return RunDetailState.live_poll(run_id)
+
+    @rx.event(background=True)
+    async def live_poll(self, run_id: int) -> None:
+        """Poll DB every 3s while run is still executing."""
+        while True:
+            await asyncio.sleep(3)
+            async with self:
+                self._load_run_data(run_id)
+                if self.run.get("status") not in ("running", "pending"):
+                    self.is_live = False
+                    break
 
     def toggle_result(self, index: int) -> None:
         if self.expanded_result == index:
@@ -183,7 +182,9 @@ class RunDetailState(State):
         else:
             self.expanded_result = index
 
-    def rerun(self) -> rx.Component:
+    def rerun(self):
+        from web.pages.runs import RunState
+
         run_id_str = self.router.page.params.get("run_id", "0")
         try:
             run_id = int(run_id_str)
@@ -198,8 +199,9 @@ class RunDetailState(State):
             if not dataset:
                 return
 
+            base_name = original.name.split(" (rerun)")[0]
             run = EvalRun(
-                name=f"{original.name} (rerun)",
+                name=f"{base_name} (rerun)",
                 dataset_id=original.dataset_id,
                 status="pending",
                 metrics_json=original.metrics_json,
@@ -212,7 +214,8 @@ class RunDetailState(State):
             session.refresh(run)
             new_run_id = run.id
 
-        return rx.redirect(f"/runs/{new_run_id}")
+        yield rx.redirect(f"/runs/{new_run_id}")
+        yield RunState.execute_run(new_run_id)
 
     def export_results(self) -> rx.Component:
         export_data = {
@@ -221,9 +224,7 @@ class RunDetailState(State):
         }
         return rx.download(
             data=json.dumps(export_data, indent=2, default=str),
-            filename=(
-                f"run_{self.run.get('id', 'unknown')}_results.json"
-            ),
+            filename=(f"run_{self.run.get('id', 'unknown')}_results.json"),
         )
 
 
@@ -376,9 +377,7 @@ def _result_row(r: rx.Var) -> rx.Component:
                     ),
                     variant="ghost",
                     size="1",
-                    on_click=RunDetailState.toggle_result(
-                        r["index"]
-                    ),
+                    on_click=RunDetailState.toggle_result(r["index"]),
                 ),
                 align="center",
                 width="100%",
@@ -410,6 +409,10 @@ def _header_section() -> rx.Component:
         rx.hstack(
             rx.heading(RunDetailState.run["name"], size="6"),
             status_badge(RunDetailState.run["status"]),
+            rx.cond(
+                RunDetailState.is_live,
+                rx.badge("● Live", color_scheme="teal", variant="soft", size="1"),
+            ),
             rx.spacer(),
             rx.button(
                 rx.icon("rotate-cw", size=14),
