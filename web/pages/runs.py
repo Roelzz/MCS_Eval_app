@@ -49,7 +49,9 @@ class RunState(State):
     # Compare mode
     compare_selected: list[int] = []
     show_compare: bool = False
-    compare_data: dict = {}
+    compare_run_a: dict = {}
+    compare_run_b: dict = {}
+    compare_metrics: list[dict] = []
 
     def load_runs(self) -> None:
         with rx.session() as session:
@@ -168,27 +170,25 @@ class RunState(State):
         scores_b = avg_scores(results_b)
         all_metrics = sorted(set(scores_a) | set(scores_b))
 
-        self.compare_data = {
-            "run_a": {
-                "id": run_a.id,
-                "name": run_a.name,
-                "pass_rate": f"{pass_rate(results_a):.0%}",
-            },
-            "run_b": {
-                "id": run_b.id,
-                "name": run_b.name,
-                "pass_rate": f"{pass_rate(results_b):.0%}",
-            },
-            "metrics": [
-                {
-                    "name": m,
-                    "a_score": scores_a.get(m, 0),
-                    "b_score": scores_b.get(m, 0),
-                    "delta": scores_b.get(m, 0) - scores_a.get(m, 0),
-                }
-                for m in all_metrics
-            ],
+        self.compare_run_a = {
+            "name": run_a.name,
+            "pass_rate": f"{pass_rate(results_a):.0%}",
         }
+        self.compare_run_b = {
+            "name": run_b.name,
+            "pass_rate": f"{pass_rate(results_b):.0%}",
+        }
+        self.compare_metrics = [
+            {
+                "name": m,
+                "a_score": f"{scores_a.get(m, 0):.0%}",
+                "b_score": f"{scores_b.get(m, 0):.0%}",
+                "delta_up": scores_b.get(m, 0) > scores_a.get(m, 0),
+                "delta_down": scores_b.get(m, 0) < scores_a.get(m, 0),
+                "delta_display": f"{abs(scores_b.get(m, 0) - scores_a.get(m, 0)):.0%}",
+            }
+            for m in all_metrics
+        ]
 
     def open_compare(self) -> None:
         self.load_compare_data()
@@ -569,13 +569,13 @@ def compare_dialog() -> rx.Component:
                 rx.hstack(
                     rx.text("Metric", weight="medium", width="160px"),
                     rx.text(
-                        RunState.compare_data["run_a"]["name"],
+                        RunState.compare_run_a["name"],
                         weight="medium",
                         flex="1",
                         color_scheme="blue",
                     ),
                     rx.text(
-                        RunState.compare_data["run_b"]["name"],
+                        RunState.compare_run_b["name"],
                         weight="medium",
                         flex="1",
                         color_scheme="teal",
@@ -587,30 +587,22 @@ def compare_dialog() -> rx.Component:
                 rx.separator(width="100%"),
                 # Metric rows
                 rx.foreach(
-                    RunState.compare_data["metrics"],
+                    RunState.compare_metrics,
                     lambda m: rx.hstack(
-                        rx.text(m["name"].to(str), size="2", width="160px"),
-                        rx.text(
-                            (m["a_score"] * 100).to(int).to(str) + "%",
-                            size="2",
-                            flex="1",
-                        ),
-                        rx.text(
-                            (m["b_score"] * 100).to(int).to(str) + "%",
-                            size="2",
-                            flex="1",
-                        ),
+                        rx.text(m["name"], size="2", width="160px"),
+                        rx.text(m["a_score"], size="2", flex="1"),
+                        rx.text(m["b_score"], size="2", flex="1"),
                         rx.cond(
-                            m["delta"] > 0,
+                            m["delta_up"],
                             rx.badge(
-                                "↑ " + (m["delta"] * 100).to(int).to(str) + "%",
+                                "↑ " + m["delta_display"],
                                 color_scheme="green",
                                 size="1",
                             ),
                             rx.cond(
-                                m["delta"] < 0,
+                                m["delta_down"],
                                 rx.badge(
-                                    "↓ " + (m["delta"] * 100).to(int).to(str) + "%",
+                                    "↓ " + m["delta_display"],
                                     color_scheme="red",
                                     size="1",
                                 ),
@@ -626,16 +618,8 @@ def compare_dialog() -> rx.Component:
                 # Pass rate row
                 rx.hstack(
                     rx.text("Pass Rate", size="2", weight="medium", width="160px"),
-                    rx.text(
-                        RunState.compare_data["run_a"]["pass_rate"],
-                        size="2",
-                        flex="1",
-                    ),
-                    rx.text(
-                        RunState.compare_data["run_b"]["pass_rate"],
-                        size="2",
-                        flex="1",
-                    ),
+                    rx.text(RunState.compare_run_a["pass_rate"], size="2", flex="1"),
+                    rx.text(RunState.compare_run_b["pass_rate"], size="2", flex="1"),
                     rx.text("", width="80px"),
                     width="100%",
                     spacing="2",

@@ -55,7 +55,7 @@ def test_toggle_compare_max_two():
 
 
 def test_load_compare_data_structure():
-    """compare_data has correct shape when two runs are loaded."""
+    """compare_run_a, compare_run_b, compare_metrics populated correctly."""
     from web.pages.runs import RunState
 
     run_a = _make_run(1, "Run A")
@@ -101,12 +101,14 @@ def test_load_compare_data_structure():
         mock_ctx.return_value.__exit__ = MagicMock(return_value=False)
         state.load_compare_data()
 
-    data = state.compare_data
-    assert data["run_a"]["name"] == "Run A"
-    assert data["run_b"]["name"] == "Run B"
-    assert len(data["metrics"]) == 1
-    metric = data["metrics"][0]
+    assert state.compare_run_a["name"] == "Run A"
+    assert state.compare_run_b["name"] == "Run B"
+    assert len(state.compare_metrics) == 1
+
+    metric = state.compare_metrics[0]
     assert metric["name"] == "answer_relevancy"
-    assert abs(metric["a_score"] - 0.7) < 0.01  # avg of 0.8 + 0.6
-    assert abs(metric["b_score"] - 0.8) < 0.01  # avg of 0.9 + 0.7
-    assert abs(metric["delta"] - 0.1) < 0.01
+    assert metric["a_score"] == "70%"  # avg of 0.8 + 0.6 = 0.7 -> 70%
+    assert metric["b_score"] == "80%"  # avg of 0.9 + 0.7 = 0.8 -> 80%
+    assert metric["delta_up"] is True
+    assert metric["delta_down"] is False
+    assert metric["delta_display"] == "10%"  # abs(0.8 - 0.7) = 0.1 -> 10%
