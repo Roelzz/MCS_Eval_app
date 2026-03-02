@@ -178,6 +178,14 @@ class RunState(State):
             "name": run_b.name,
             "pass_rate": f"{pass_rate(results_b):.0%}",
         }
+        def delta_str(sa: float, sb: float) -> str:
+            d = sb - sa
+            if d > 0:
+                return f"↑ {abs(d):.0%}"
+            if d < 0:
+                return f"↓ {abs(d):.0%}"
+            return "—"
+
         self.compare_metrics = [
             {
                 "name": m,
@@ -185,7 +193,7 @@ class RunState(State):
                 "b_score": f"{scores_b.get(m, 0):.0%}",
                 "delta_up": scores_b.get(m, 0) > scores_a.get(m, 0),
                 "delta_down": scores_b.get(m, 0) < scores_a.get(m, 0),
-                "delta_display": f"{abs(scores_b.get(m, 0) - scores_a.get(m, 0)):.0%}",
+                "delta_str": delta_str(scores_a.get(m, 0), scores_b.get(m, 0)),
             }
             for m in all_metrics
         ]
@@ -594,18 +602,10 @@ def compare_dialog() -> rx.Component:
                         rx.text(m["b_score"], size="2", flex="1"),
                         rx.cond(
                             m["delta_up"],
-                            rx.badge(
-                                "↑ " + m["delta_display"],
-                                color_scheme="green",
-                                size="1",
-                            ),
+                            rx.badge(m["delta_str"], color_scheme="green", size="1"),
                             rx.cond(
                                 m["delta_down"],
-                                rx.badge(
-                                    "↓ " + m["delta_display"],
-                                    color_scheme="red",
-                                    size="1",
-                                ),
+                                rx.badge(m["delta_str"], color_scheme="red", size="1"),
                                 rx.badge("—", color_scheme="gray", size="1"),
                             ),
                         ),

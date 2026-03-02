@@ -111,4 +111,4 @@ def test_load_compare_data_structure():
     assert metric["b_score"] == "80%"  # avg of 0.9 + 0.7 = 0.8 -> 80%
     assert metric["delta_up"] is True
     assert metric["delta_down"] is False
-    assert metric["delta_display"] == "10%"  # abs(0.8 - 0.7) = 0.1 -> 10%
+    assert metric["delta_str"] == "↑ 10%"  # abs(0.8 - 0.7) = 0.1 → 10%
