@@ -272,7 +272,7 @@ async def test_measure_with_retry_succeeds_first_try():
     mock_metric = MagicMock()
     mock_metric.measure.return_value = None  # sync function, no exception
 
-    with patch("asyncio.sleep") as mock_sleep:
+    with patch("eval_engine.asyncio.sleep") as mock_sleep:
         await _measure_with_retry(mock_metric, MagicMock())
 
     mock_metric.measure.assert_called_once()
