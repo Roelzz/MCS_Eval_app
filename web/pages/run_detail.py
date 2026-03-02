@@ -150,8 +150,6 @@ class RunDetailState(State):
                     }
                 )
 
-            self.expanded_result = -1
-
     def load_run(self) -> None:
         run_id_str = self.router.page.params.get("run_id", "0")
         try:
@@ -160,6 +158,7 @@ class RunDetailState(State):
             return
 
         self._load_run_data(run_id)
+        self.expanded_result = -1  # reset on initial page load only
 
         if self.run.get("status") == "running" and not self.is_live:
             self.is_live = True
