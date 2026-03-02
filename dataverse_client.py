@@ -102,6 +102,64 @@ class DataverseClient:
         logger.info(f"Fetched {len(records)} transcript(s) from Dataverse")
         return records
 
+    def extract_conversation(self, content_json: str) -> list[dict]:
+        """Extract message turns from transcript content as a conversation list.
+
+        Parses Bot Framework message activities from the content column of a
+        conversationtranscript record.
+
+        Args:
+            content_json: The JSON string from the 'content' column.
+
+        Returns:
+            List of dicts with keys:
+                role: "user" | "assistant"
+                content: str — the message text
+                timestamp: str | None
+        """
+        if not content_json:
+            return []
+
+        try:
+            activities = json.loads(content_json)
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.warning(f"Failed to parse transcript content for conversation: {e}")
+            return []
+
+        if not isinstance(activities, list):
+            return []
+
+        turns: list[dict] = []
+        for activity in activities:
+            if activity.get("type") != "message":
+                continue
+
+            text = activity.get("text", "")
+            if not text or not text.strip():
+                continue
+
+            from_field = activity.get("from") or {}
+            # Bot Framework: "user" for humans, "bot" for the agent
+            raw_role = from_field.get("role", "")
+            if raw_role == "user":
+                role = "user"
+            elif raw_role in ("bot", "skill"):
+                role = "assistant"
+            else:
+                # Fall back: check from.id — bots often have 'bot' in their id
+                from_id = from_field.get("id", "").lower()
+                role = "user" if ("user" in from_id or not from_id) else "assistant"
+
+            turns.append(
+                {
+                    "role": role,
+                    "content": text.strip(),
+                    "timestamp": activity.get("timestamp"),
+                }
+            )
+
+        return turns
+
     def parse_transcript(self, content_json: str) -> dict:
         """Parse the content column of a conversationtranscript record.
 
