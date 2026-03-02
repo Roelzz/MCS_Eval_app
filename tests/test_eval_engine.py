@@ -26,9 +26,12 @@ async def test_evaluate_case_single_turn(mock_env):
 
     with (
         patch("eval_engine._get_judge_model", return_value=_mock_judge()),
-        patch("eval_engine.METRIC_REGISTRY", {
-            "answer_relevancy": lambda model, threshold: mock_metric,
-        }),
+        patch(
+            "eval_engine.METRIC_REGISTRY",
+            {
+                "answer_relevancy": lambda model, threshold: mock_metric,
+            },
+        ),
     ):
         from eval_engine import evaluate_case
 
@@ -62,10 +65,13 @@ async def test_evaluate_case_multiple_metrics(mock_env):
 
     with (
         patch("eval_engine._get_judge_model", return_value=_mock_judge()),
-        patch("eval_engine.METRIC_REGISTRY", {
-            "answer_relevancy": lambda model, threshold: mock_metric_a,
-            "task_completion": lambda model, threshold: mock_metric_b,
-        }),
+        patch(
+            "eval_engine.METRIC_REGISTRY",
+            {
+                "answer_relevancy": lambda model, threshold: mock_metric_a,
+                "task_completion": lambda model, threshold: mock_metric_b,
+            },
+        ),
     ):
         from eval_engine import evaluate_case
 
@@ -88,15 +94,19 @@ async def test_evaluate_case_multiple_metrics(mock_env):
 
 @pytest.mark.asyncio
 async def test_evaluate_case_metric_error(mock_env):
-    """Test graceful handling when a metric raises an error."""
+    """Test graceful handling when a metric raises an error (after retries)."""
     mock_metric = MagicMock()
     mock_metric.measure.side_effect = Exception("API timeout")
 
     with (
         patch("eval_engine._get_judge_model", return_value=_mock_judge()),
-        patch("eval_engine.METRIC_REGISTRY", {
-            "answer_relevancy": lambda model, threshold: mock_metric,
-        }),
+        patch(
+            "eval_engine.METRIC_REGISTRY",
+            {
+                "answer_relevancy": lambda model, threshold: mock_metric,
+            },
+        ),
+        patch("eval_engine.asyncio.sleep"),  # skip retry delays
     ):
         from eval_engine import evaluate_case
 
@@ -115,6 +125,7 @@ async def test_evaluate_case_metric_error(mock_env):
     assert result["answer_relevancy"]["score"] == 0.0
     assert "Error" in result["answer_relevancy"]["reason"]
     assert result["answer_relevancy"]["passed"] is False
+    assert mock_metric.measure.call_count == 3  # 3 attempts before giving up
 
 
 @pytest.mark.asyncio
@@ -250,13 +261,66 @@ async def test_evaluate_case_topic_routing(mock_env):
     assert result["topic_routing"]["passed"] is True
 
 
+# --- Retry helper tests ---
+
+
+@pytest.mark.asyncio
+async def test_measure_with_retry_succeeds_first_try():
+    """No retries when measure succeeds immediately."""
+    from eval_engine import _measure_with_retry
+
+    mock_metric = MagicMock()
+    mock_metric.measure.return_value = None  # sync function, no exception
+
+    with patch("asyncio.sleep") as mock_sleep:
+        await _measure_with_retry(mock_metric, MagicMock())
+
+    mock_metric.measure.assert_called_once()
+    mock_sleep.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_measure_with_retry_succeeds_second_try():
+    """Retries once when first attempt fails."""
+    from eval_engine import _measure_with_retry
+
+    mock_metric = MagicMock()
+    mock_metric.measure.side_effect = [Exception("timeout"), None]
+
+    with patch("eval_engine.asyncio.sleep") as mock_sleep:
+        await _measure_with_retry(mock_metric, MagicMock(), max_attempts=3)
+
+    assert mock_metric.measure.call_count == 2
+    mock_sleep.assert_called_once_with(2.0)
+
+
+@pytest.mark.asyncio
+async def test_measure_with_retry_fails_all_attempts():
+    """Raises after all attempts exhausted."""
+    from eval_engine import _measure_with_retry
+
+    mock_metric = MagicMock()
+    mock_metric.measure.side_effect = Exception("persistent failure")
+
+    with patch("eval_engine.asyncio.sleep") as mock_sleep:
+        with pytest.raises(Exception, match="persistent failure"):
+            await _measure_with_retry(mock_metric, MagicMock(), max_attempts=3)
+
+    assert mock_metric.measure.call_count == 3
+    assert mock_sleep.call_count == 2  # sleeps after attempt 1 and 2
+    calls = [c.args[0] for c in mock_sleep.call_args_list]
+    assert calls == [2.0, 4.0]
+
+
 # --- Tier 1 metric tests ---
 
 
 def test_exact_match_hit():
     from eval_engine import _evaluate_exact_match
 
-    result = _evaluate_exact_match("Python is a programming language.", "Python is a programming language.")
+    result = _evaluate_exact_match(
+        "Python is a programming language.", "Python is a programming language."
+    )
     assert result["score"] == 1.0
     assert result["passed"] is True
 
@@ -289,7 +353,9 @@ def test_exact_match_no_expected():
 def test_keyword_match_any_one_found():
     from eval_engine import _evaluate_keyword_match
 
-    result = _evaluate_keyword_match("You have 5 vacation days remaining.", ["days remaining", "holiday"], "any")
+    result = _evaluate_keyword_match(
+        "You have 5 vacation days remaining.", ["days remaining", "holiday"], "any"
+    )
     assert result["score"] == 1.0
     assert result["passed"] is True
     assert "days remaining" in result["reason"]
@@ -298,7 +364,9 @@ def test_keyword_match_any_one_found():
 def test_keyword_match_any_none_found():
     from eval_engine import _evaluate_keyword_match
 
-    result = _evaluate_keyword_match("No relevant content here.", ["days remaining", "vacation"], "any")
+    result = _evaluate_keyword_match(
+        "No relevant content here.", ["days remaining", "vacation"], "any"
+    )
     assert result["score"] == 0.0
     assert result["passed"] is False
 
