@@ -312,6 +312,42 @@ async def test_measure_with_retry_fails_all_attempts():
     assert calls == [2.0, 4.0]
 
 
+@pytest.mark.asyncio
+async def test_evaluate_case_jitter_applied(mock_env):
+    """Jitter sleep is called once per AI metric evaluated."""
+    mock_metric = MagicMock()
+    mock_metric.score = 0.8
+    mock_metric.reason = "Good"
+
+    with (
+        patch("eval_engine._get_judge_model", return_value=_mock_judge()),
+        patch(
+            "eval_engine.METRIC_REGISTRY",
+            {
+                "answer_relevancy": lambda model, threshold: mock_metric,
+            },
+        ),
+        patch("eval_engine.asyncio.sleep") as mock_sleep,
+        patch("eval_engine.random.uniform", return_value=0.5) as mock_uniform,
+    ):
+        from eval_engine import evaluate_case
+
+        await evaluate_case(
+            turns=[{"role": "user", "content": "Test"}],
+            conversation=[
+                {"role": "user", "content": "Test"},
+                {"role": "assistant", "content": "Response"},
+            ],
+            expected_output="",
+            context="",
+            metric_names=["answer_relevancy"],
+            threshold=0.5,
+        )
+
+    mock_uniform.assert_called_once_with(0, 1.5)
+    mock_sleep.assert_called_once_with(0.5)
+
+
 # --- Tier 1 metric tests ---
 
 

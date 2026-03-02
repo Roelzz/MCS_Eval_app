@@ -5,6 +5,7 @@ Uses Azure OpenAI GPT-4o as judge model.
 
 import asyncio
 import os
+import random
 from typing import Any
 
 from deepeval.metrics import (
@@ -307,7 +308,7 @@ async def evaluate_case(
             else:
                 test_case = _build_llm_test_case(turns, conversation, expected_output, context)
 
-            # DeepEval metrics have a measure() method
+            await asyncio.sleep(random.uniform(0, 1.5))
             await _measure_with_retry(metric, test_case)
 
             results[name] = {
