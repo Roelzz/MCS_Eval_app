@@ -46,11 +46,14 @@ class RunState(State):
     max_concurrent: int = 3
     create_error: str = ""
 
+    # Compare mode
+    compare_selected: list[int] = []
+    show_compare: bool = False
+    compare_data: dict = {}
+
     def load_runs(self) -> None:
         with rx.session() as session:
-            rows = session.exec(
-                select(EvalRun).order_by(EvalRun.created_at.desc())
-            ).all()
+            rows = session.exec(select(EvalRun).order_by(EvalRun.created_at.desc())).all()
         self.runs = [
             {
                 "id": r.id,
@@ -59,8 +62,7 @@ class RunState(State):
                 "avg_score": f"{r.avg_score:.1%}" if r.avg_score > 0 else "—",
                 "progress": f"{r.completed_cases}/{r.total_cases}",
                 "progress_pct": (
-                    round(r.completed_cases / r.total_cases * 100)
-                    if r.total_cases > 0 else 0
+                    round(r.completed_cases / r.total_cases * 100) if r.total_cases > 0 else 0
                 ),
                 "error": r.error,
                 "created": r.created_at.strftime("%d-%m-%Y %H:%M"),
@@ -70,16 +72,12 @@ class RunState(State):
 
         # Load datasets for the select dropdown
         with rx.session() as ds_session:
-            datasets = ds_session.exec(
-                select(Dataset).order_by(Dataset.name)
-            ).all()
+            datasets = ds_session.exec(select(Dataset).order_by(Dataset.name)).all()
             self.dataset_options = [
-                f"{d.name} ({d.num_cases} cases, {d.eval_type})"
-                for d in datasets
+                f"{d.name} ({d.num_cases} cases, {d.eval_type})" for d in datasets
             ]
             self.dataset_id_map = {
-                f"{d.name} ({d.num_cases} cases, {d.eval_type})": d.id
-                for d in datasets
+                f"{d.name} ({d.num_cases} cases, {d.eval_type})": d.id for d in datasets
             }
 
     def open_create_dialog(self) -> None:
@@ -119,11 +117,85 @@ class RunState(State):
         except ValueError:
             self.max_concurrent = 3
 
-    def toggle_metric(self, metric: str) -> None:
-        if metric in self.selected_metrics:
-            self.selected_metrics = [m for m in self.selected_metrics if m != metric]
-        else:
+    def set_metric(self, checked: bool, metric: str) -> None:
+        if checked and metric not in self.selected_metrics:
             self.selected_metrics = self.selected_metrics + [metric]
+        elif not checked and metric in self.selected_metrics:
+            self.selected_metrics = [m for m in self.selected_metrics if m != metric]
+
+    def toggle_compare(self, run_id: int) -> None:
+        if run_id in self.compare_selected:
+            self.compare_selected = [r for r in self.compare_selected if r != run_id]
+        elif len(self.compare_selected) >= 2:
+            self.compare_selected = [self.compare_selected[1], run_id]
+        else:
+            self.compare_selected = self.compare_selected + [run_id]
+
+    def load_compare_data(self) -> None:
+        if len(self.compare_selected) != 2:
+            return
+
+        run_id_a, run_id_b = self.compare_selected[0], self.compare_selected[1]
+
+        with rx.session() as session:
+            run_a = session.get(EvalRun, run_id_a)
+            run_b = session.get(EvalRun, run_id_b)
+            if not run_a or not run_b:
+                return
+
+            results_a = session.exec(
+                select(EvalResult).where(EvalResult.eval_run_id == run_id_a)
+            ).all()
+            results_b = session.exec(
+                select(EvalResult).where(EvalResult.eval_run_id == run_id_b)
+            ).all()
+
+        def avg_scores(results):
+            totals: dict[str, list[float]] = {}
+            for r in results:
+                scores = json.loads(r.scores_json) if r.scores_json else {}
+                for mname, data in scores.items():
+                    if isinstance(data, dict):
+                        totals.setdefault(mname, []).append(data.get("score", 0))
+            return {m: sum(v) / len(v) for m, v in totals.items()}
+
+        def pass_rate(results):
+            if not results:
+                return 0.0
+            return sum(1 for r in results if r.passed) / len(results)
+
+        scores_a = avg_scores(results_a)
+        scores_b = avg_scores(results_b)
+        all_metrics = sorted(set(scores_a) | set(scores_b))
+
+        self.compare_data = {
+            "run_a": {
+                "id": run_a.id,
+                "name": run_a.name,
+                "pass_rate": f"{pass_rate(results_a):.0%}",
+            },
+            "run_b": {
+                "id": run_b.id,
+                "name": run_b.name,
+                "pass_rate": f"{pass_rate(results_b):.0%}",
+            },
+            "metrics": [
+                {
+                    "name": m,
+                    "a_score": scores_a.get(m, 0),
+                    "b_score": scores_b.get(m, 0),
+                    "delta": scores_b.get(m, 0) - scores_a.get(m, 0),
+                }
+                for m in all_metrics
+            ],
+        }
+
+    def open_compare(self) -> None:
+        self.load_compare_data()
+        self.show_compare = True
+
+    def close_compare(self) -> None:
+        self.show_compare = False
 
     def rerun(self, run_id: int) -> None:
         with rx.session() as session:
@@ -134,8 +206,9 @@ class RunState(State):
             if not dataset:
                 return
 
+            base_name = original.name.split(" (rerun)")[0]
             run = EvalRun(
-                name=f"{original.name} (rerun)",
+                name=f"{base_name} (rerun)",
                 dataset_id=original.dataset_id,
                 status="pending",
                 metrics_json=original.metrics_json,
@@ -173,11 +246,13 @@ class RunState(State):
                 dataset_id=self.selected_dataset_id,
                 status="pending",
                 metrics_json=json.dumps(self.selected_metrics),
-                config_json=json.dumps({
-                    "threshold": self.threshold,
-                    "delay_seconds": self.delay_seconds,
-                    "max_concurrent": self.max_concurrent,
-                }),
+                config_json=json.dumps(
+                    {
+                        "threshold": self.threshold,
+                        "delay_seconds": self.delay_seconds,
+                        "max_concurrent": self.max_concurrent,
+                    }
+                ),
                 total_cases=dataset.num_cases,
                 created_at=datetime.utcnow(),
             )
@@ -252,7 +327,8 @@ class RunState(State):
 
                     avg_case_score = (
                         sum(s.get("score", 0) for s in scores.values()) / len(scores)
-                        if scores else 0
+                        if scores
+                        else 0
                     )
                     passed = avg_case_score >= threshold
 
@@ -338,7 +414,7 @@ def create_run_dialog() -> rx.Component:
                             rx.checkbox(
                                 metric.replace("_", " ").title(),
                                 checked=RunState.selected_metrics.contains(metric),
-                                on_change=lambda _val, m=metric: RunState.toggle_metric(m),
+                                on_change=lambda val, m=metric: RunState.set_metric(val, m),
                             ),
                             spacing="2",
                         )
@@ -416,11 +492,11 @@ def create_run_dialog() -> rx.Component:
     )
 
 
-
 def runs_table() -> rx.Component:
     return rx.table.root(
         rx.table.header(
             rx.table.row(
+                rx.table.column_header_cell(""),  # checkbox column
                 rx.table.column_header_cell("Name"),
                 rx.table.column_header_cell("Status"),
                 rx.table.column_header_cell("Progress"),
@@ -433,6 +509,12 @@ def runs_table() -> rx.Component:
             rx.foreach(
                 RunState.runs,
                 lambda r: rx.table.row(
+                    rx.table.cell(
+                        rx.checkbox(
+                            checked=RunState.compare_selected.contains(r["id"]),
+                            on_change=lambda _: RunState.toggle_compare(r["id"]),
+                        ),
+                    ),
                     rx.table.cell(rx.text(r["name"], weight="medium")),
                     rx.table.cell(status_badge(r["status"])),
                     rx.table.cell(
@@ -470,6 +552,108 @@ def runs_table() -> rx.Component:
     )
 
 
+def compare_dialog() -> rx.Component:
+    return rx.dialog.root(
+        rx.dialog.content(
+            rx.dialog.title(
+                rx.hstack(
+                    rx.text("Run Comparison"),
+                    rx.spacer(),
+                    rx.dialog.close(
+                        rx.button(rx.icon("x", size=14), variant="ghost", size="1"),
+                    ),
+                ),
+            ),
+            rx.vstack(
+                # Run names header
+                rx.hstack(
+                    rx.text("Metric", weight="medium", width="160px"),
+                    rx.text(
+                        RunState.compare_data["run_a"]["name"],
+                        weight="medium",
+                        flex="1",
+                        color_scheme="blue",
+                    ),
+                    rx.text(
+                        RunState.compare_data["run_b"]["name"],
+                        weight="medium",
+                        flex="1",
+                        color_scheme="teal",
+                    ),
+                    rx.text("Delta", weight="medium", width="80px"),
+                    width="100%",
+                    spacing="2",
+                ),
+                rx.separator(width="100%"),
+                # Metric rows
+                rx.foreach(
+                    RunState.compare_data["metrics"],
+                    lambda m: rx.hstack(
+                        rx.text(m["name"].to(str), size="2", width="160px"),
+                        rx.text(
+                            (m["a_score"] * 100).to(int).to(str) + "%",
+                            size="2",
+                            flex="1",
+                        ),
+                        rx.text(
+                            (m["b_score"] * 100).to(int).to(str) + "%",
+                            size="2",
+                            flex="1",
+                        ),
+                        rx.cond(
+                            m["delta"] > 0,
+                            rx.badge(
+                                "↑ " + (m["delta"] * 100).to(int).to(str) + "%",
+                                color_scheme="green",
+                                size="1",
+                            ),
+                            rx.cond(
+                                m["delta"] < 0,
+                                rx.badge(
+                                    "↓ " + (m["delta"] * 100).to(int).to(str) + "%",
+                                    color_scheme="red",
+                                    size="1",
+                                ),
+                                rx.badge("—", color_scheme="gray", size="1"),
+                            ),
+                        ),
+                        width="100%",
+                        spacing="2",
+                        align="center",
+                    ),
+                ),
+                rx.separator(width="100%"),
+                # Pass rate row
+                rx.hstack(
+                    rx.text("Pass Rate", size="2", weight="medium", width="160px"),
+                    rx.text(
+                        RunState.compare_data["run_a"]["pass_rate"],
+                        size="2",
+                        flex="1",
+                    ),
+                    rx.text(
+                        RunState.compare_data["run_b"]["pass_rate"],
+                        size="2",
+                        flex="1",
+                    ),
+                    rx.text("", width="80px"),
+                    width="100%",
+                    spacing="2",
+                ),
+                spacing="2",
+                width="100%",
+            ),
+            max_width="600px",
+        ),
+        open=RunState.show_compare,
+        on_open_change=lambda open: rx.cond(
+            open,
+            RunState.open_compare(),
+            RunState.close_compare(),
+        ),
+    )
+
+
 @rx.page(route="/runs", title="Eval Runs", on_load=RunState.load_runs)
 def runs_page() -> rx.Component:
     return layout(
@@ -477,6 +661,16 @@ def runs_page() -> rx.Component:
             rx.hstack(
                 page_header("Eval Runs", "Configure and run evaluations"),
                 rx.spacer(),
+                rx.cond(
+                    RunState.compare_selected.length() == 2,
+                    rx.button(
+                        rx.icon("git-compare", size=16),
+                        "Compare (2)",
+                        on_click=RunState.open_compare,
+                        variant="soft",
+                        size="2",
+                    ),
+                ),
                 rx.button(
                     rx.icon("plus", size=16),
                     "New Run",
@@ -492,6 +686,7 @@ def runs_page() -> rx.Component:
                 empty_state("No eval runs yet. Create a dataset first, then start a run.", "play"),
             ),
             create_run_dialog(),
+            compare_dialog(),
             spacing="4",
             width="100%",
         ),
