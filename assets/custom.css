@@ -3,19 +3,34 @@
 :root {
     --font-body: 'Outfit', -apple-system, sans-serif;
     --font-mono: 'JetBrains Mono', monospace;
-    --surface-glass: rgba(255, 255, 255, 0.03);
-    --surface-glass-hover: rgba(255, 255, 255, 0.06);
-    --border-subtle: rgba(255, 255, 255, 0.06);
-    --border-active: rgba(94, 234, 212, 0.3);
-    --glow-teal: 0 0 20px rgba(94, 234, 212, 0.08);
     --score-green: #34d399;
     --score-yellow: #fbbf24;
     --score-red: #f87171;
+    --border-subtle: rgba(255, 255, 255, 0.06);
+    --surface-glass: rgba(255, 255, 255, 0.03);
+    --surface-glass-hover: rgba(255, 255, 255, 0.06);
+    --bg-app: #0a0a0f;
+    --bg-dialog: #111118;
+    --border-active: rgba(94, 234, 212, 0.3);
+    --glow-teal: 0 0 20px rgba(94, 234, 212, 0.08);
+    --sidebar-border: rgba(255, 255, 255, 0.06);
+}
+
+/* Light mode overrides via Radix .light class on theme wrapper */
+.light {
+    --border-subtle: rgba(0, 0, 0, 0.08);
+    --surface-glass: rgba(0, 0, 0, 0.02);
+    --surface-glass-hover: rgba(0, 0, 0, 0.04);
+    --bg-app: #f4f4f8;
+    --bg-dialog: #ffffff;
+    --border-active: rgba(0, 122, 112, 0.3);
+    --glow-teal: 0 0 20px rgba(0, 122, 112, 0.08);
+    --sidebar-border: rgba(0, 0, 0, 0.08);
 }
 
 body {
     font-family: var(--font-body) !important;
-    background: #0a0a0f !important;
+    background: var(--bg-app) !important;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
 }
@@ -45,13 +60,25 @@ code, [class*="rt-Code"],
     border-color: rgba(255, 255, 255, 0.1) !important;
 }
 
+.light [class*="rt-Card"]:hover {
+    border-color: rgba(0, 0, 0, 0.12) !important;
+}
+
 /* Table styling */
 [class*="rt-TableRoot"] {
     --table-row-background-hover: rgba(255, 255, 255, 0.03);
 }
 
+.light [class*="rt-TableRoot"] {
+    --table-row-background-hover: rgba(0, 0, 0, 0.03);
+}
+
 [class*="rt-TableHeader"] {
     background: rgba(255, 255, 255, 0.02);
+}
+
+.light [class*="rt-TableHeader"] {
+    background: rgba(0, 0, 0, 0.02);
 }
 
 [class*="rt-TableColumnHeaderCell"] {
@@ -65,7 +92,7 @@ code, [class*="rt-Code"],
 }
 
 [class*="rt-TableCell"] {
-    border-bottom: 1px solid rgba(255, 255, 255, 0.03) !important;
+    border-bottom: 1px solid var(--border-subtle) !important;
     font-size: 0.875rem;
 }
 
@@ -85,7 +112,7 @@ code, [class*="rt-Code"],
 [class*="rt-TextFieldInput"],
 [class*="rt-TextAreaInput"],
 [class*="rt-SelectTrigger"] {
-    background: rgba(255, 255, 255, 0.03) !important;
+    background: var(--surface-glass) !important;
     border: 1px solid var(--border-subtle) !important;
     font-family: var(--font-body) !important;
     transition: border-color 0.2s ease;
@@ -114,7 +141,7 @@ code, [class*="rt-Code"],
 
 [class*="rt-DialogContent"],
 [class*="rt-AlertDialogContent"] {
-    background: #111118 !important;
+    background: var(--bg-dialog) !important;
     border: 1px solid var(--border-subtle) !important;
 }
 
@@ -143,14 +170,27 @@ code, [class*="rt-Code"],
     border-radius: 3px;
 }
 
+.light ::-webkit-scrollbar-thumb {
+    background: rgba(0, 0, 0, 0.12);
+}
+
 ::-webkit-scrollbar-thumb:hover {
     background: rgba(255, 255, 255, 0.2);
 }
 
-/* Recharts overrides for dark theme */
+.light ::-webkit-scrollbar-thumb:hover {
+    background: rgba(0, 0, 0, 0.2);
+}
+
+/* Recharts overrides */
 .recharts-cartesian-grid-horizontal line,
 .recharts-cartesian-grid-vertical line {
     stroke: rgba(255, 255, 255, 0.05) !important;
+}
+
+.light .recharts-cartesian-grid-horizontal line,
+.light .recharts-cartesian-grid-vertical line {
+    stroke: rgba(0, 0, 0, 0.07) !important;
 }
 
 .recharts-text {
@@ -160,7 +200,7 @@ code, [class*="rt-Code"],
 }
 
 .recharts-tooltip-wrapper .recharts-default-tooltip {
-    background: #111118 !important;
+    background: var(--bg-dialog) !important;
     border: 1px solid var(--border-subtle) !important;
     border-radius: 6px !important;
     font-family: var(--font-mono) !important;
@@ -181,4 +221,54 @@ code, [class*="rt-Code"],
 .sidebar-link-active {
     background: var(--accent-a3) !important;
     border-left: 2px solid var(--accent-9) !important;
+}
+
+/* Score bars */
+.score-bar-track {
+    width: 100%;
+    height: 6px;
+    border-radius: 3px;
+    background: var(--surface-glass-hover);
+    overflow: hidden;
+}
+
+.score-bar-fill {
+    height: 100%;
+    border-radius: 3px;
+    transition: width 0.4s ease;
+}
+
+/* Chat bubbles */
+.chat-bubble-user {
+    background: var(--accent-a3);
+    border: 1px solid var(--border-active);
+    border-radius: 12px 12px 4px 12px;
+    padding: 10px 14px;
+    font-size: 0.875rem;
+    max-width: 80%;
+    align-self: flex-end;
+}
+
+.chat-bubble-assistant {
+    background: var(--surface-glass);
+    border: 1px solid var(--border-subtle);
+    border-radius: 4px 12px 12px 12px;
+    padding: 10px 14px;
+    font-size: 0.875rem;
+    max-width: 80%;
+    align-self: flex-start;
+}
+
+/* Run name link in table */
+.run-name-link {
+    font-weight: 500;
+    cursor: pointer;
+    text-decoration: none;
+    color: inherit;
+    transition: color 0.15s ease;
+}
+
+.run-name-link:hover {
+    color: var(--accent-9) !important;
+    text-decoration: underline;
 }

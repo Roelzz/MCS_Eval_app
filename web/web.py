@@ -12,7 +12,7 @@ from web.pages.setup import setup_page  # noqa: F401
 
 app = rx.App(
     theme=rx.theme(
-        appearance="dark",
+        appearance="inherit",
         accent_color="teal",
         gray_color="slate",
         radius="small",
