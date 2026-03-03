@@ -54,6 +54,7 @@ class ResultRow(rx.Base):
     scores_color: str = "gray"
     conv_turns: list[ConvTurn] = []
     tool_lines: list[ToolLine] = []
+    has_error: bool = False
 
 
 class RunDetailState(State):
@@ -187,6 +188,15 @@ class RunDetailState(State):
                                 line += f"  args: {args}"
                             tool_lines.append(ToolLine(icon="link", text=line, color="purple"))
 
+                        elif atype == "retro_info":
+                            outcome = a.get("session_outcome", "Unknown")
+                            csat = a.get("csat")
+                            length = a.get("conversation_length")
+                            csat_str = f"  |  CSAT: {csat:.1f}" if csat is not None else ""
+                            length_str = f"  |  Turns: {length}" if length is not None else ""
+                            line = f"Outcome: {outcome}{csat_str}{length_str}"
+                            tool_lines.append(ToolLine(icon="history", text=line, color="teal"))
+
                         else:
                             line = f"[{atype}] {aname}"
                             if value:
@@ -208,6 +218,7 @@ class RunDetailState(State):
                     scores_color=overall_color,
                     conv_turns=conv_turns,
                     tool_lines=tool_lines,
+                    has_error=(r.actual_output or "").startswith("Error:"),
                 ))
 
     def load_run(self) -> None:
@@ -461,6 +472,16 @@ def _tool_line(item: rx.Var) -> rx.Component:
 def _expanded_content(r: rx.Var) -> rx.Component:
     return rx.vstack(
         rx.separator(margin_top="4px", margin_bottom="8px"),
+        # Error callout (shown when actual_output starts with "Error:")
+        rx.cond(
+            r["has_error"],
+            rx.callout(
+                r["actual_output"].to(str),
+                icon="triangle_alert",
+                color_scheme="red",
+                width="100%",
+            ),
+        ),
         # Conversation
         rx.cond(
             r["conv_turns"].length() > 0,

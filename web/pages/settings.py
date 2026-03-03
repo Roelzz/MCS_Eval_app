@@ -1,6 +1,7 @@
 """Settings page — config display, connection test, test agent, app registration guide."""
 
 import os
+import re
 from pathlib import Path
 
 import reflex as rx
@@ -14,6 +15,8 @@ ENV_VARS = [
     ("AZURE_AD_CLIENT_SECRET", "Azure AD Client Secret"),
     ("COPILOT_ENVIRONMENT_ID", "Copilot Environment ID"),
     ("COPILOT_AGENT_IDENTIFIER", "Copilot Agent Identifier"),
+    ("COPILOT_AGENT_SCHEMA", "Copilot Agent Schema Name"),
+    ("DATAVERSE_ORG_URL", "Dataverse Org URL"),
     ("AZURE_OPENAI_ENDPOINT", "Azure OpenAI Endpoint"),
     ("AZURE_OPENAI_API_KEY", "Azure OpenAI API Key"),
     ("AZURE_OPENAI_DEPLOYMENT_NAME", "Azure OpenAI Deployment"),
@@ -24,6 +27,12 @@ SECRET_VARS = {"AZURE_AD_CLIENT_SECRET", "AZURE_OPENAI_API_KEY"}
 
 # Build a flat list of var names for indexing
 VAR_NAMES = [v[0] for v in ENV_VARS]
+
+
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
 
 
 def _find_env_file() -> Path:
@@ -45,6 +54,7 @@ class SettingsState(State):
     test_agent_response: str = ""
     is_testing_agent: bool = False
     guide_open: bool = False
+    d2e_url: str = ""
 
     # Edit mode
     edit_mode: bool = False
@@ -52,10 +62,25 @@ class SettingsState(State):
     save_result: str = ""
     save_success: bool = False
 
+    test_agent_403: bool = False
+    client_id_display: str = ""
+
+    # GUID resolve
+    agent_id_is_guid: bool = False
+    resolved_schema_name: str = ""
+    schema_resolve_error: str = ""
+    is_resolving_schema: bool = False
+    manual_schema_name: str = ""
+
     def set_test_agent_message(self, value: str) -> None:
         self.test_agent_message = value
 
+    def set_manual_schema_name(self, value: str) -> None:
+        self.manual_schema_name = value
+
     def load_config(self) -> None:
+        from dotenv import load_dotenv
+        load_dotenv(override=True)
         items = []
         for var_name, label in ENV_VARS:
             value = os.getenv(var_name, "")
@@ -67,6 +92,22 @@ class SettingsState(State):
                 display = value
             items.append([label, display, "set" if value else "missing"])
         self.config_items = items
+
+        agent_id = os.getenv("COPILOT_AGENT_IDENTIFIER", "")
+        schema_set = bool(os.getenv("COPILOT_AGENT_SCHEMA", "").strip())
+        self.agent_id_is_guid = bool(_UUID_RE.match(agent_id)) and not schema_set
+        self.resolved_schema_name = ""
+        self.schema_resolve_error = ""
+        self.manual_schema_name = ""
+        self.client_id_display = os.getenv("AZURE_AD_CLIENT_ID", "(not set)")
+
+        try:
+            from d2e_client import _get_settings
+            settings = _get_settings()
+            from microsoft_agents.copilotstudio.client.power_platform_environment import PowerPlatformEnvironment
+            self.d2e_url = PowerPlatformEnvironment.get_copilot_studio_connection_url(settings=settings)
+        except Exception:
+            self.d2e_url = ""
 
     def toggle_edit_mode(self) -> None:
         if not self.edit_mode:
@@ -124,6 +165,96 @@ class SettingsState(State):
             self.save_success = False
             self.save_result = f"Error saving: {e}"
 
+    def resolve_schema_name(self) -> None:
+        """Look up the agent schema name from Dataverse using the GUID in COPILOT_AGENT_IDENTIFIER."""
+        from dotenv import load_dotenv
+        load_dotenv(override=True)
+
+        client_secret = os.getenv("AZURE_AD_CLIENT_SECRET", "")
+        if not client_secret:
+            self.schema_resolve_error = "AZURE_AD_CLIENT_SECRET is required for auto-resolve."
+            return
+
+        self.is_resolving_schema = True
+        self.resolved_schema_name = ""
+        self.schema_resolve_error = ""
+        yield
+
+        try:
+            import httpx
+            import msal
+
+            tenant_id = os.environ["AZURE_AD_TENANT_ID"]
+            client_id = os.environ["AZURE_AD_CLIENT_ID"]
+            org_url = os.environ["DATAVERSE_ORG_URL"].rstrip("/")
+            agent_id = os.environ["COPILOT_AGENT_IDENTIFIER"]
+
+            app = msal.ConfidentialClientApplication(
+                client_id,
+                authority=f"https://login.microsoftonline.com/{tenant_id}",
+                client_credential=client_secret,
+            )
+            result = app.acquire_token_for_client(scopes=[f"{org_url}/.default"])
+            if "access_token" not in result:
+                error = result.get("error_description", result.get("error", "Unknown"))
+                self.schema_resolve_error = f"Token acquisition failed: {error}"
+                return
+
+            resp = httpx.get(
+                f"{org_url}/api/data/v9.2/bots({agent_id})",
+                params={"$select": "schemaname,name"},
+                headers={"Authorization": f"Bearer {result['access_token']}"},
+                timeout=30,
+            )
+            if resp.status_code >= 400:
+                self.schema_resolve_error = f"Dataverse query failed: {resp.status_code} {resp.text[:200]}"
+                return
+
+            bot_data = resp.json()
+            schema_name = bot_data.get("schemaname", "")
+            if not schema_name:
+                self.schema_resolve_error = "Bot found but has no schemaname field."
+                return
+
+            self.resolved_schema_name = schema_name
+        except Exception as e:
+            self.schema_resolve_error = f"Error: {e}"
+        finally:
+            self.is_resolving_schema = False
+
+    def save_schema_name(self) -> None:
+        """Write schema name (resolved or manual) as COPILOT_AGENT_SCHEMA to .env and reload."""
+        schema_name = self.resolved_schema_name or self.manual_schema_name
+        if not schema_name:
+            return
+        env_path = _find_env_file()
+        try:
+            existing_lines: list[str] = []
+            if env_path.exists():
+                existing_lines = env_path.read_text().splitlines()
+
+            existing_map: dict[str, int] = {}
+            for idx, line in enumerate(existing_lines):
+                stripped = line.strip()
+                if stripped and not stripped.startswith("#") and "=" in stripped:
+                    key = stripped.split("=", 1)[0].strip()
+                    existing_map[key] = idx
+
+            new_line = f"COPILOT_AGENT_SCHEMA={schema_name}"
+            if "COPILOT_AGENT_SCHEMA" in existing_map:
+                existing_lines[existing_map["COPILOT_AGENT_SCHEMA"]] = new_line
+            else:
+                existing_lines.append(new_line)
+
+            env_path.write_text("\n".join(existing_lines) + "\n")
+
+            from dotenv import load_dotenv
+            load_dotenv(str(env_path), override=True)
+
+            self.load_config()
+        except Exception as e:
+            self.schema_resolve_error = f"Error saving: {e}"
+
     def test_connection(self) -> None:
         from dotenv import load_dotenv
         load_dotenv(override=True)
@@ -151,12 +282,15 @@ class SettingsState(State):
 
         self.is_testing_agent = True
         self.test_agent_response = ""
+        self.test_agent_403 = False
         yield
         try:
             from d2e_client import test_agent
             self.test_agent_response = test_agent(self.test_agent_message)
         except Exception as e:
-            self.test_agent_response = f"Error: {e}"
+            msg = str(e)
+            self.test_agent_403 = "HTTP 403" in msg
+            self.test_agent_response = f"Error: {msg}"
         finally:
             self.is_testing_agent = False
 
@@ -224,6 +358,109 @@ def _edit_field(index: int, var_name: str, label: str) -> rx.Component:
         ),
         spacing="4",
         align="center",
+        width="100%",
+    )
+
+
+def _guid_warning_banner() -> rx.Component:
+    return rx.vstack(
+        rx.callout(
+            rx.hstack(
+                rx.text(
+                    "COPILOT_AGENT_IDENTIFIER is a GUID. D2E requires the schema name (e.g. cr123_myagent).",
+                    size="2",
+                ),
+                rx.spacer(),
+                rx.button(
+                    rx.cond(
+                        SettingsState.is_resolving_schema,
+                        rx.hstack(rx.spinner(size="1"), rx.text("Resolving..."), align="center", spacing="2"),
+                        rx.text("Resolve from Dataverse"),
+                    ),
+                    on_click=SettingsState.resolve_schema_name,
+                    disabled=SettingsState.is_resolving_schema,
+                    size="2",
+                    color_scheme="amber",
+                    variant="soft",
+                ),
+                align="center",
+                width="100%",
+            ),
+            icon="triangle_alert",
+            color_scheme="amber",
+            width="100%",
+        ),
+        rx.cond(
+            SettingsState.schema_resolve_error != "",
+            rx.vstack(
+                rx.callout(
+                    rx.vstack(
+                        rx.text(SettingsState.schema_resolve_error, size="2"),
+                        rx.text(
+                            "The app service principal needs to be added as an Application User in Dataverse "
+                            "(Power Platform Admin Center → Environments → Users → Application Users). "
+                            "Or enter the schema name manually below.",
+                            size="2",
+                            color="var(--red-11)",
+                        ),
+                        spacing="1",
+                        width="100%",
+                    ),
+                    icon="triangle_alert",
+                    color_scheme="red",
+                    width="100%",
+                ),
+                rx.hstack(
+                    rx.input(
+                        placeholder="e.g. cr123_myagent",
+                        value=SettingsState.manual_schema_name,
+                        on_change=SettingsState.set_manual_schema_name,
+                        font_family="var(--font-mono)",
+                        size="2",
+                        width="100%",
+                    ),
+                    rx.button(
+                        rx.icon("save", size=14),
+                        "Save to .env",
+                        on_click=SettingsState.save_schema_name,
+                        disabled=SettingsState.manual_schema_name == "",
+                        size="2",
+                        color_scheme="green",
+                    ),
+                    align="center",
+                    spacing="2",
+                    width="100%",
+                ),
+                spacing="2",
+                width="100%",
+            ),
+        ),
+        rx.cond(
+            SettingsState.resolved_schema_name != "",
+            rx.callout(
+                rx.hstack(
+                    rx.vstack(
+                        rx.text("Schema name resolved:", size="1", weight="medium", color="var(--gray-a8)"),
+                        rx.code(SettingsState.resolved_schema_name, size="2"),
+                        spacing="1",
+                    ),
+                    rx.spacer(),
+                    rx.button(
+                        rx.icon("save", size=14),
+                        "Save to .env",
+                        on_click=SettingsState.save_schema_name,
+                        size="2",
+                        color_scheme="green",
+                    ),
+                    align="center",
+                    width="100%",
+                ),
+                icon="check",
+                color_scheme="green",
+                width="100%",
+            ),
+        ),
+        spacing="2",
         width="100%",
     )
 
@@ -302,6 +539,10 @@ def config_section() -> rx.Component:
                 ),
                 # Read-only table
                 _config_view_table(),
+            ),
+            rx.cond(
+                SettingsState.agent_id_is_guid,
+                _guid_warning_banner(),
             ),
             spacing="4",
             width="100%",
@@ -393,6 +634,15 @@ def test_agent_section() -> rx.Component:
                 align="start",
                 width="100%",
             ),
+            rx.cond(
+                SettingsState.d2e_url != "",
+                rx.vstack(
+                    rx.text("D2E endpoint", size="1", weight="medium", color="var(--gray-a8)"),
+                    rx.code(SettingsState.d2e_url, size="1"),
+                    spacing="1",
+                    width="100%",
+                ),
+            ),
             rx.hstack(
                 rx.input(
                     placeholder="Type a test message...",
@@ -438,6 +688,37 @@ def test_agent_section() -> rx.Component:
                         width="100%",
                     ),
                     spacing="2",
+                    width="100%",
+                ),
+            ),
+            rx.cond(
+                SettingsState.test_agent_403,
+                rx.callout(
+                    rx.vstack(
+                        rx.text(
+                            "403 — D2E rejected the request. Two likely causes:",
+                            size="2",
+                            weight="bold",
+                        ),
+                        rx.text(
+                            "1. Stale token: the cached browser-login token expired. "
+                            "Delete .local_token_cache.json and restart the app to force a fresh login.",
+                            size="2",
+                        ),
+                        rx.text(
+                            "2. Wrong agent identifier: if COPILOT_AGENT_SCHEMA is set in .env, "
+                            "verify it matches the exact schema name of your agent (e.g. cr123_myagent).",
+                            size="2",
+                        ),
+                        rx.code(
+                            "Client ID: " + SettingsState.client_id_display,
+                            size="1",
+                        ),
+                        spacing="2",
+                        width="100%",
+                    ),
+                    icon="triangle_alert",
+                    color_scheme="red",
                     width="100%",
                 ),
             ),

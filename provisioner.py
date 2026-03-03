@@ -299,6 +299,139 @@ def register_power_platform_admin_app(
     logger.info("Registered app {} as Power Platform admin application", client_id)
 
 
+def _get_org_url_from_env(bap_token: str, environment_id: str) -> str:
+    """Fetch Dataverse org URL for an environment from the BAP API."""
+    headers = {"Authorization": f"Bearer {bap_token}"}
+    resp = httpx.get(
+        f"{_BAP_BASE}/providers/Microsoft.BusinessAppPlatform"
+        f"/environments/{environment_id}?api-version=2021-04-01",
+        headers=headers,
+        timeout=30,
+    )
+    if resp.status_code >= 400:
+        raise RuntimeError(f"Failed to get environment info: {resp.status_code} {resp.text}")
+    env_data = resp.json()
+    org_url = (
+        env_data.get("properties", {})
+        .get("linkedEnvironmentMetadata", {})
+        .get("instanceUrl", "")
+    )
+    if not org_url:
+        raise RuntimeError("Could not find Dataverse org URL for this environment")
+    return org_url.rstrip("/")
+
+
+def add_secret_to_existing_app(graph_token: str, app_client_id: str) -> str:
+    """Add a new client secret to an existing app registration and return it.
+
+    Looks up the app by its appId (client ID), then calls addPassword.
+    Requires Application.ReadWrite.All on the Graph token.
+    """
+    headers = {
+        "Authorization": f"Bearer {graph_token}",
+        "Content-Type": "application/json",
+    }
+    resp = _graph_get(headers, "/applications", {"$filter": f"appId eq '{app_client_id}'"})
+    resp.raise_for_status()
+    apps = resp.json().get("value", [])
+    if not apps:
+        raise RuntimeError(
+            f"App registration with client ID '{app_client_id}' not found in this tenant"
+        )
+    app_object_id = apps[0]["id"]
+
+    secret_body = {"passwordCredential": {"displayName": "mcs-eval-auto"}}
+    resp = _graph_post(headers, f"/applications/{app_object_id}/addPassword", secret_body)
+    if resp.status_code >= 400:
+        raise RuntimeError(f"Failed to add client secret: {resp.status_code} {resp.text}")
+
+    client_secret = resp.json()["secretText"]
+    logger.info("Added client secret to app {}", app_client_id)
+    return client_secret
+
+
+def lookup_env_details_with_credentials(
+    tenant_id: str,
+    client_id: str,
+    client_secret: str,
+    environment_id: str,
+    bot_id: str = "",
+) -> tuple[str, str]:
+    """Fetch (dataverse_org_url, agent_schema_name) using client credentials.
+
+    No device flow needed — uses the existing app registration directly.
+
+    Args:
+        tenant_id: Azure AD tenant ID.
+        client_id: App registration client ID.
+        client_secret: App registration client secret.
+        environment_id: Power Platform environment GUID.
+        bot_id: Bot GUID for schema name lookup; skip lookup if empty string.
+
+    Returns:
+        (org_url, schema_name) — schema_name is "" when bot_id is "".
+    """
+    bap_scope = "https://api.bap.microsoft.com/.default"
+    app = msal.ConfidentialClientApplication(
+        client_id,
+        authority=f"https://login.microsoftonline.com/{tenant_id}",
+        client_credential=client_secret,
+    )
+
+    result = app.acquire_token_for_client(scopes=[bap_scope])
+    if "access_token" not in result:
+        error = result.get("error_description", result.get("error", "Unknown"))
+        raise RuntimeError(f"BAP token failed: {error}")
+
+    org_url = _get_org_url_from_env(result["access_token"], environment_id)
+    logger.info("Dataverse org URL: {}", org_url)
+
+    if not bot_id:
+        return org_url, ""
+
+    dv_result = app.acquire_token_for_client(scopes=[f"{org_url}/.default"])
+    if "access_token" not in dv_result:
+        error = dv_result.get("error_description", dv_result.get("error", "Unknown"))
+        raise RuntimeError(f"Dataverse token failed: {error}")
+
+    headers = {"Authorization": f"Bearer {dv_result['access_token']}"}
+    resp = httpx.get(
+        f"{org_url}/api/data/v9.2/bots({bot_id})",
+        params={"$select": "schemaname,name"},
+        headers=headers,
+        timeout=30,
+    )
+    if resp.status_code >= 400:
+        raise RuntimeError(f"Failed to query bot: {resp.status_code} {resp.text}")
+
+    bot_data = resp.json()
+    schema_name = bot_data.get("schemaname", "")
+    if not schema_name:
+        raise RuntimeError(f"Bot {bot_id} found but has no schemaname")
+
+    logger.info("Agent schema name: {}", schema_name)
+    return org_url, schema_name
+
+
+def lookup_dataverse_org_url(
+    msal_app: msal.PublicClientApplication,
+    environment_id: str,
+) -> str:
+    """Return the Dataverse org URL for the given Power Platform environment.
+
+    Requires a cached BAP token (call after complete_device_flow / register_power_platform_admin_app).
+    """
+    accounts = msal_app.get_accounts()
+    if not accounts:
+        raise RuntimeError("No cached account for org URL lookup")
+    result = msal_app.acquire_token_silent(_BAP_SCOPES, account=accounts[0])
+    if not result or "access_token" not in result:
+        raise RuntimeError("Cannot acquire BAP token silently for org URL lookup")
+    org_url = _get_org_url_from_env(result["access_token"], environment_id)
+    logger.info("Dataverse org URL: {}", org_url)
+    return org_url
+
+
 def lookup_agent_schema_name(
     msal_app: msal.PublicClientApplication,
     environment_id: str,
@@ -321,26 +454,7 @@ def lookup_agent_schema_name(
         bap_token = result["access_token"]
 
     # Step 1: Get environment details to find the Dataverse org URL
-    headers = {"Authorization": f"Bearer {bap_token}"}
-    resp = httpx.get(
-        f"{_BAP_BASE}/providers/Microsoft.BusinessAppPlatform"
-        f"/environments/{environment_id}?api-version=2021-04-01",
-        headers=headers,
-        timeout=30,
-    )
-    if resp.status_code >= 400:
-        raise RuntimeError(f"Failed to get environment info: {resp.status_code} {resp.text}")
-
-    env_data = resp.json()
-    # The org URL is in properties.linkedEnvironmentMetadata.instanceUrl
-    org_url = (
-        env_data.get("properties", {})
-        .get("linkedEnvironmentMetadata", {})
-        .get("instanceUrl", "")
-    )
-    if not org_url:
-        raise RuntimeError("Could not find Dataverse org URL for this environment")
-    org_url = org_url.rstrip("/")
+    org_url = _get_org_url_from_env(bap_token, environment_id)
     logger.info("Dataverse org URL: {}", org_url)
 
     # Step 2: Get a Dataverse token for this org

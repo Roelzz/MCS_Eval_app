@@ -6,6 +6,7 @@ import time
 from datetime import datetime
 
 import reflex as rx
+from loguru import logger
 from sqlmodel import select
 
 from web.components import empty_state, layout, page_header, status_badge
@@ -361,6 +362,7 @@ class RunState(State):
                             session.commit()
 
                 except Exception as e:
+                    logger.error(f"Case {idx} failed: {e}")
                     async with self:
                         with rx.session() as session:
                             result = EvalResult(

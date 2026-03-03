@@ -1,4 +1,6 @@
-"""Setup page — automated Azure AD app registration from Copilot Studio agent URL."""
+"""Setup page — fill environment variables from Copilot Studio agent URL."""
+
+import os
 
 import reflex as rx
 
@@ -13,33 +15,34 @@ class SetupState(State):
     agent_url: str = ""
     url_error: str = ""
 
-    # Step 2
+    # Parsed from URL
     environment_id: str = ""
     bot_id: str = ""
-    agent_identifier: str = ""
-    app_display_name: str = "Copilot Studio Eval Platform"
 
-    # Step 3
+    # Step 2 — existing app registration
+    client_id: str = ""
+    agent_identifier: str = ""  # optional; auto-detect from Dataverse if empty
+
+    # Step 3 — provisioning
     is_provisioning: bool = False
     provisioning_error: str = ""
     device_code: str = ""
     device_code_url: str = ""
     log_lines: list[str] = []
 
-    # Step 4
-    created_tenant_id: str = ""
-    created_client_id: str = ""
-    created_client_secret: str = ""
-    env_written: bool = False
+    # Step 4 — result
+    written_tenant_id: str = ""
+    written_org_url: str = ""
+    written_agent_id: str = ""
 
     def set_agent_url(self, value: str) -> None:
         self.agent_url = value
 
+    def set_client_id(self, value: str) -> None:
+        self.client_id = value
+
     def set_agent_identifier(self, value: str) -> None:
         self.agent_identifier = value
-
-    def set_app_display_name(self, value: str) -> None:
-        self.app_display_name = value
 
     def parse_url(self) -> None:
         self.url_error = ""
@@ -49,10 +52,16 @@ class SetupState(State):
             parsed = parse_copilot_url(self.agent_url)
             self.environment_id = parsed.environment_id
             self.bot_id = parsed.bot_id
-            self.agent_identifier = ""
+            self.client_id = os.getenv("AZURE_AD_CLIENT_ID", "")
+            # Use the bot GUID directly — no schema name lookup needed
+            self.agent_identifier = parsed.bot_id
             self.current_step = 2
         except ValueError as e:
             self.url_error = str(e)
+
+    def go_back(self) -> None:
+        if self.current_step > 1:
+            self.current_step -= 1
 
     @rx.event(background=True)
     async def provision(self) -> None:
@@ -63,10 +72,10 @@ class SetupState(State):
             self.device_code = ""
             self.device_code_url = ""
             self.log_lines = []
-            display_name = self.app_display_name
             env_id = self.environment_id
-            bot_guid = self.bot_id
-            agent_id = self.agent_identifier
+            bot_id = self.bot_id
+            app_client_id = self.client_id.strip()
+            agent_id = self.agent_identifier.strip()
 
         async def _log(msg: str) -> None:
             async with self:
@@ -76,14 +85,18 @@ class SetupState(State):
             import webbrowser
 
             from provisioner import (
+                add_secret_to_existing_app,
                 complete_device_flow,
-                create_app_registration,
                 initiate_device_flow,
                 lookup_agent_schema_name,
-                register_power_platform_admin_app,
+                lookup_dataverse_org_url,
                 update_env_file,
             )
 
+            if not app_client_id:
+                raise ValueError("Client ID is required")
+
+            # Step 1: device flow for Graph (uses Azure CLI public client — no secret needed)
             await _log("Initiating device code flow for Microsoft Graph...")
             msal_app, flow = initiate_device_flow()
 
@@ -95,106 +108,49 @@ class SetupState(State):
             webbrowser.open(flow["verification_uri"])
 
             await _log("Waiting for sign-in...")
-            token, tenant_id = complete_device_flow(msal_app, flow)
+            graph_token, tenant_id = complete_device_flow(msal_app, flow)
             await _log(f"Authenticated — tenant: {tenant_id}")
 
             async with self:
                 self.device_code = ""
 
-            await _log("Ensuring Power Platform API service principal exists...")
-            await _log("Creating app registration...")
-            result = create_app_registration(token, display_name)
-            await _log(f"App created — client ID: {result.client_id}")
+            # Step 2: add a new client secret to the existing app registration
+            await _log(f"Adding client secret to app {app_client_id}...")
+            client_secret = add_secret_to_existing_app(graph_token, app_client_id)
+            await _log("Client secret created.")
 
-            await _log("Registering as Power Platform admin application...")
+            # Step 3: BAP API → Dataverse org URL (uses cached BAP token, no second login)
+            await _log("Looking up Dataverse org URL...")
+            org_url = lookup_dataverse_org_url(msal_app, env_id)
+            await _log(f"Dataverse org URL: {org_url}")
 
-            def _on_bap_device_code(code: str, url: str) -> None:
-                # Can't use async here — this runs in a sync context inside
-                # register_power_platform_admin_app. We store the values and
-                # the UI will pick them up via the state vars set below.
-                pass
-
-            # We need to update UI with BAP device code if needed.
-            # Since the callback is sync, we pre-set a flag and use a wrapper.
-            bap_code_info: list[tuple[str, str]] = []
-
-            def _capture_bap_code(code: str, url: str) -> None:
-                bap_code_info.append((code, url))
-
-            # Try silent first, if it fails the callback captures the code
-            # We need to handle the async state update between the callback
-            # and the blocking device flow. Split into two phases:
-            from provisioner import _BAP_SCOPES
-
-            accounts = msal_app.get_accounts()
-            silent = msal_app.acquire_token_silent(_BAP_SCOPES, account=accounts[0])
-            if silent and "access_token" in silent:
-                await _log("BAP token acquired silently (cached)")
-                register_power_platform_admin_app(msal_app, result.client_id)
-            else:
-                await _log("Second sign-in required for Power Platform API...")
-                bap_flow = msal_app.initiate_device_flow(scopes=_BAP_SCOPES)
-                if "user_code" not in bap_flow:
-                    raise RuntimeError(f"BAP device flow failed: {bap_flow}")
-
-                async with self:
-                    self.device_code = bap_flow["user_code"]
-                    self.device_code_url = bap_flow["verification_uri"]
-
-                await _log(
-                    f"Sign in at {bap_flow['verification_uri']} "
-                    f"with code: {bap_flow['user_code']}"
-                )
-                webbrowser.open(bap_flow["verification_uri"])
-
-                await _log("Waiting for Power Platform sign-in...")
-                bap_result = msal_app.acquire_token_by_device_flow(bap_flow)
-                if "access_token" not in bap_result:
-                    error = bap_result.get("error_description", "Unknown")
-                    raise RuntimeError(f"BAP token failed: {error}")
-
-                async with self:
-                    self.device_code = ""
-
-                await _log("BAP token acquired")
-                # Now call register with the token already cached
-                register_power_platform_admin_app(msal_app, result.client_id)
-
-            await _log("Registered as Power Platform admin app")
-
-            # Look up agent schema name if not manually provided
+            # Step 4: look up agent schema name if not provided
             if not agent_id:
                 await _log("Looking up agent schema name from Dataverse...")
-                agent_id = lookup_agent_schema_name(msal_app, env_id, bot_guid)
+                agent_id = lookup_agent_schema_name(msal_app, env_id, bot_id)
                 await _log(f"Agent schema name: {agent_id}")
-                async with self:
-                    self.agent_identifier = agent_id
 
+            # Step 5: write all vars to .env and reload
             updates = {
-                "AZURE_AD_TENANT_ID": result.tenant_id,
-                "AZURE_AD_CLIENT_ID": result.client_id,
-                "AZURE_AD_CLIENT_SECRET": "",  # clear — D2E uses interactive auth
+                "AZURE_AD_TENANT_ID": tenant_id,
+                "AZURE_AD_CLIENT_ID": app_client_id,
+                "AZURE_AD_CLIENT_SECRET": client_secret,
                 "COPILOT_ENVIRONMENT_ID": env_id,
                 "COPILOT_AGENT_IDENTIFIER": agent_id,
+                "DATAVERSE_ORG_URL": org_url,
             }
 
             await _log("Writing .env file...")
             update_env_file(".env", updates)
 
             from dotenv import load_dotenv
-
             load_dotenv(override=True)
-            await _log("Done! .env updated and reloaded into running process.")
+            await _log("Done.")
 
             async with self:
-                self.created_tenant_id = result.tenant_id
-                self.created_client_id = result.client_id
-                secret = result.client_secret
-                if len(secret) > 8:
-                    self.created_client_secret = secret[:4] + "..." + secret[-4:]
-                else:
-                    self.created_client_secret = "****"
-                self.env_written = True
+                self.written_tenant_id = tenant_id
+                self.written_org_url = org_url
+                self.written_agent_id = agent_id
                 self.is_provisioning = False
                 self.current_step = 4
 
@@ -204,12 +160,10 @@ class SetupState(State):
                 self.provisioning_error = str(e)
                 self.is_provisioning = False
 
-    def go_back(self) -> None:
-        if self.current_step > 1:
-            self.current_step -= 1
 
-    def go_to_step(self, step: int) -> None:
-        self.current_step = step
+# ---------------------------------------------------------------------------
+# UI
+# ---------------------------------------------------------------------------
 
 
 def _step_indicator() -> rx.Component:
@@ -257,7 +211,7 @@ def _step_1_paste_url() -> rx.Component:
             rx.text(
                 "Open your agent in Copilot Studio and copy the URL from your browser.",
                 size="2",
-                color_scheme="gray",
+                color="var(--gray-a8)",
             ),
             rx.code(
                 "https://copilotstudio.preview.microsoft.com"
@@ -280,11 +234,7 @@ def _step_1_paste_url() -> rx.Component:
                     width="100%",
                 ),
             ),
-            rx.button(
-                "Parse URL",
-                on_click=SetupState.parse_url,
-                size="3",
-            ),
+            rx.button("Next", on_click=SetupState.parse_url, size="3"),
             spacing="3",
             width="100%",
         ),
@@ -296,15 +246,16 @@ def _step_2_confirm() -> rx.Component:
     return rx.card(
         rx.vstack(
             rx.text(
-                "Confirm configuration",
+                "Confirm your existing app registration",
                 size="3",
                 weight="bold",
                 letter_spacing="-0.01em",
             ),
             rx.text(
-                "Review the extracted values before creating the app registration.",
+                "A browser window will open for Microsoft login. "
+                "A new client secret will be generated and added to your existing app registration.",
                 size="2",
-                color_scheme="gray",
+                color="var(--gray-a8)",
             ),
             rx.vstack(
                 rx.text("Environment ID", size="2", weight="medium"),
@@ -317,34 +268,39 @@ def _step_2_confirm() -> rx.Component:
                 spacing="1",
             ),
             rx.vstack(
-                rx.text("Agent Identifier (schema name)", size="2", weight="medium"),
+                rx.text("Application (client) ID", size="2", weight="medium"),
                 rx.text(
-                    "Leave empty to auto-detect from Dataverse, or enter manually "
-                    "(e.g. cr123_myAgent).",
+                    "Azure Portal → App registrations → your app → Overview → Application (client) ID.",
                     size="1",
-                    color_scheme="gray",
+                    color="var(--gray-a8)",
                 ),
                 rx.input(
-                    placeholder="auto-detect if empty",
-                    value=SetupState.agent_identifier,
-                    on_change=SetupState.set_agent_identifier,
+                    placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+                    value=SetupState.client_id,
+                    on_change=SetupState.set_client_id,
                     width="100%",
+                    font_family="var(--font-mono)",
                 ),
                 spacing="1",
             ),
             rx.vstack(
-                rx.text("App Display Name", size="2", weight="medium"),
+                rx.text("Agent Identifier (bot UUID)", size="2", weight="medium"),
+                rx.text(
+                    "Pre-filled from the URL. Override only if you want to use a schema name instead.",
+                    size="1",
+                    color="var(--gray-a8)",
+                ),
                 rx.input(
-                    value=SetupState.app_display_name,
-                    on_change=SetupState.set_app_display_name,
+                    placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+                    value=SetupState.agent_identifier,
+                    on_change=SetupState.set_agent_identifier,
                     width="100%",
+                    font_family="var(--font-mono)",
                 ),
                 spacing="1",
             ),
             rx.callout(
-                "This will open your browser for Azure AD login (possibly twice: "
-                "once for Graph API, once for Power Platform). "
-                "You need admin permissions in your tenant.",
+                "You need Application.ReadWrite.All in your tenant to add secrets to the app registration.",
                 icon="info",
                 color_scheme="blue",
                 width="100%",
@@ -357,7 +313,7 @@ def _step_2_confirm() -> rx.Component:
                     size="3",
                 ),
                 rx.button(
-                    "Create App Registration",
+                    "Login & Configure",
                     on_click=SetupState.provision,
                     size="3",
                 ),
@@ -374,7 +330,7 @@ def _step_3_provisioning() -> rx.Component:
     return rx.card(
         rx.vstack(
             rx.text(
-                "Creating app registration",
+                "Configuring environment",
                 size="3",
                 weight="bold",
                 letter_spacing="-0.01em",
@@ -411,7 +367,7 @@ def _step_3_provisioning() -> rx.Component:
                 SetupState.is_provisioning,
                 rx.hstack(
                     rx.spinner(size="3"),
-                    rx.text("Provisioning in progress...", size="2", color_scheme="gray"),
+                    rx.text("Working...", size="2", color="var(--gray-a8)"),
                     spacing="3",
                     align="center",
                 ),
@@ -458,7 +414,7 @@ def _step_4_done() -> rx.Component:
     return rx.card(
         rx.vstack(
             rx.callout(
-                "App registration created and .env updated successfully!",
+                ".env updated and reloaded successfully.",
                 icon="check",
                 color_scheme="green",
                 width="100%",
@@ -466,36 +422,40 @@ def _step_4_done() -> rx.Component:
             rx.table.root(
                 rx.table.header(
                     rx.table.row(
-                        rx.table.column_header_cell("Setting"),
+                        rx.table.column_header_cell("Variable"),
                         rx.table.column_header_cell("Value"),
                     ),
                 ),
                 rx.table.body(
                     rx.table.row(
-                        rx.table.cell(rx.text("Tenant ID", weight="medium")),
-                        rx.table.cell(rx.code(SetupState.created_tenant_id)),
+                        rx.table.cell(rx.text("AZURE_AD_TENANT_ID", weight="medium")),
+                        rx.table.cell(rx.code(SetupState.written_tenant_id)),
                     ),
                     rx.table.row(
-                        rx.table.cell(rx.text("Client ID", weight="medium")),
-                        rx.table.cell(rx.code(SetupState.created_client_id)),
+                        rx.table.cell(rx.text("DATAVERSE_ORG_URL", weight="medium")),
+                        rx.table.cell(rx.code(SetupState.written_org_url)),
                     ),
                     rx.table.row(
-                        rx.table.cell(rx.text("Client Secret", weight="medium")),
-                        rx.table.cell(rx.code(SetupState.created_client_secret)),
+                        rx.table.cell(rx.text("COPILOT_AGENT_IDENTIFIER", weight="medium")),
+                        rx.table.cell(rx.code(SetupState.written_agent_id)),
+                    ),
+                    rx.table.row(
+                        rx.table.cell(rx.text("AZURE_AD_CLIENT_SECRET", weight="medium")),
+                        rx.table.cell(rx.text("written to .env", color="var(--gray-a8)", size="2")),
                     ),
                 ),
                 width="100%",
             ),
-            rx.callout(
-                "The client secret is NOT written to .env — D2E uses interactive auth. "
-                "Save the secret above if you need it for CI/headless runs later.",
-                icon="info",
-                color_scheme="orange",
-                width="100%",
-            ),
-            rx.link(
-                rx.button("Go to Settings", size="3", variant="outline"),
-                href="/settings",
+            rx.hstack(
+                rx.link(
+                    rx.button("Go to Transcript Extract", size="3"),
+                    href="/retro",
+                ),
+                rx.link(
+                    rx.button("Settings", size="3", variant="outline"),
+                    href="/settings",
+                ),
+                spacing="3",
             ),
             spacing="4",
             width="100%",
@@ -508,7 +468,10 @@ def _step_4_done() -> rx.Component:
 def setup_page() -> rx.Component:
     return layout(
         rx.vstack(
-            page_header("Setup", "Automated Azure AD app registration from your agent URL"),
+            page_header(
+                "Setup",
+                "Configure environment variables from your Copilot Studio agent URL",
+            ),
             _step_indicator(),
             rx.cond(SetupState.current_step == 1, _step_1_paste_url()),
             rx.cond(SetupState.current_step == 2, _step_2_confirm()),

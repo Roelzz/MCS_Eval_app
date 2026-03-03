@@ -5,7 +5,9 @@ Adapted from Evals-plural/copilot_bridge.py patterns.
 """
 
 import asyncio
+import json
 import os
+import re
 
 import aiohttp
 from loguru import logger
@@ -17,22 +19,114 @@ from microsoft_agents.copilotstudio.client.power_platform_environment import (
 
 from auth import acquire_token
 
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+
+# ── File sink: all DEBUG+ logs from this module go to logs/d2e.log ──────────
+logger.add(
+    "logs/d2e.log",
+    level="DEBUG",
+    format="{time:DD-MM-YYYY HH:mm:ss.SSS} | {level:<8} | {message}",
+    rotation="10 MB",
+    retention=3,
+    encoding="utf-8",
+)
+
+
+# ── aiohttp trace callbacks ──────────────────────────────────────────────────
+
+async def _trace_request_start(
+    session: aiohttp.ClientSession,
+    ctx: aiohttp.TraceRequestStartParams,
+    params: aiohttp.TraceRequestStartParams,
+) -> None:
+    headers = dict(params.headers)
+    if "Authorization" in headers:
+        auth = headers["Authorization"]
+        headers["Authorization"] = auth[:27] + "...<masked>"
+    logger.debug(
+        f">>> {params.method} {params.url}\n"
+        f"    Headers: {json.dumps(headers, indent=6)}"
+    )
+
+
+async def _trace_request_chunk_sent(
+    session: aiohttp.ClientSession,
+    ctx: aiohttp.TraceRequestChunkSentParams,
+    params: aiohttp.TraceRequestChunkSentParams,
+) -> None:
+    if params.chunk:
+        try:
+            body = json.loads(params.chunk)
+            logger.debug(f"    Body: {json.dumps(body, indent=6)}")
+        except Exception:
+            logger.debug(f"    Body (raw): {params.chunk[:500]}")
+
+
+async def _trace_request_end(
+    session: aiohttp.ClientSession,
+    ctx: aiohttp.TraceRequestEndParams,
+    params: aiohttp.TraceRequestEndParams,
+) -> None:
+    logger.debug(
+        f"<<< {params.response.status} {params.response.reason}\n"
+        f"    Headers: {json.dumps(dict(params.response.headers), indent=6)}"
+    )
+
+
+async def _trace_request_exception(
+    session: aiohttp.ClientSession,
+    ctx: aiohttp.TraceRequestExceptionParams,
+    params: aiohttp.TraceRequestExceptionParams,
+) -> None:
+    logger.error(f"!!! Request exception: {params.exception}")
+
+
+def _make_trace_config() -> aiohttp.TraceConfig:
+    tc = aiohttp.TraceConfig()
+    tc.on_request_start.append(_trace_request_start)
+    tc.on_request_chunk_sent.append(_trace_request_chunk_sent)
+    tc.on_request_end.append(_trace_request_end)
+    tc.on_request_exception.append(_trace_request_exception)
+    return tc
+
 
 def _get_settings() -> ConnectionSettings:
     """Build ConnectionSettings from env vars."""
-    return ConnectionSettings(
+    agent_id = os.environ["COPILOT_AGENT_IDENTIFIER"]
+    schema_name = os.environ.get("COPILOT_AGENT_SCHEMA", "").strip()
+    if schema_name:
+        logger.debug(f"Using COPILOT_AGENT_SCHEMA={schema_name!r} for D2E (overrides GUID identifier)")
+        agent_identifier = schema_name
+    elif _UUID_RE.match(agent_id):
+        logger.warning(
+            "COPILOT_AGENT_IDENTIFIER looks like a GUID — "
+            "D2E requires the agent schema name (e.g. cr123_myagent). "
+            "Set COPILOT_AGENT_SCHEMA in .env to fix this."
+        )
+        agent_identifier = agent_id
+    else:
+        agent_identifier = agent_id
+    settings = ConnectionSettings(
         environment_id=os.environ["COPILOT_ENVIRONMENT_ID"],
-        agent_identifier=os.environ["COPILOT_AGENT_IDENTIFIER"],
+        agent_identifier=agent_identifier,
     )
+    url = PowerPlatformEnvironment.get_copilot_studio_connection_url(settings=settings)
+    logger.debug(f"D2E endpoint: {url}")
+    return settings
 
 
 def _get_token() -> str:
-    """Acquire a fresh token (MSAL caches internally)."""
-    return acquire_token(
+    """Acquire a delegated user token for D2E (always browser login, never client credentials)."""
+    logger.debug("Acquiring token (flow=delegated/cached)")
+    token = acquire_token(
         tenant_id=os.environ["AZURE_AD_TENANT_ID"],
         client_id=os.environ["AZURE_AD_CLIENT_ID"],
-        client_secret=os.environ.get("AZURE_AD_CLIENT_SECRET"),
     )
+    logger.debug(f"Token acquired (length={len(token)})")
+    return token
 
 
 async def _ask_question(
@@ -152,17 +246,29 @@ def test_agent(message: str) -> str:
         except Exception as e:
             # SDK throws away the response body — make a raw request to get it
             url = PowerPlatformEnvironment.get_copilot_studio_connection_url(settings=settings)
-            async with aiohttp.ClientSession() as session:
+            req_headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {token}",
+                "Accept": "text/event-stream",
+            }
+            req_body = {"emitStartConversationEvent": True}
+            logger.debug(
+                f"[raw fallback] POST {url}\n"
+                f"    Headers: {json.dumps({k: (v[:27] + '...<masked>' if k == 'Authorization' else v) for k, v in req_headers.items()}, indent=6)}\n"
+                f"    Body: {json.dumps(req_body, indent=6)}"
+            )
+            async with aiohttp.ClientSession(trace_configs=[_make_trace_config()]) as session:
                 async with session.post(
                     url,
-                    json={"emitStartConversationEvent": True},
-                    headers={
-                        "Content-Type": "application/json",
-                        "Authorization": f"Bearer {token}",
-                        "Accept": "text/event-stream",
-                    },
+                    json=req_body,
+                    headers=req_headers,
                 ) as resp:
                     body = await resp.text()
+                    logger.error(
+                        f"[raw fallback] {resp.status} {resp.reason}\n"
+                        f"    Headers: {json.dumps(dict(resp.headers), indent=6)}\n"
+                        f"    Body: {body[:2000]}"
+                    )
                     raise RuntimeError(
                         f"D2E returned HTTP {resp.status}\n"
                         f"URL: {url}\n"
