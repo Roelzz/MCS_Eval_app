@@ -37,6 +37,7 @@ class RetroTestCase:
     dialog_redirects: list[str]
     csat: float | None
     created_at: str | None
+    tools_used: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -91,13 +92,14 @@ def extract_test_case_from_transcript(
 
     return RetroTestCase(
         transcript_id=transcript_id,
-        conversation=[{"role": t["role"], "content": t["content"]} for t in conversation],
+        conversation=[{"role": t["role"], "content": t["content"], "timestamp": t.get("timestamp")} for t in conversation],
         turns=[{"role": "user", "content": t["content"]} for t in turns],
         intent_recognition=parsed["intent_recognition"],
         session_outcome=parsed["session_info"]["outcome"],
         dialog_redirects=parsed["dialog_redirects"],
         csat=parsed["csat"],
         created_at=transcript.get("createdon"),
+        tools_used=parsed["tools_used"],
     )
 
 

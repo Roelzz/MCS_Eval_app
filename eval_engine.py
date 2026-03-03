@@ -5,6 +5,7 @@ Uses Azure OpenAI GPT-4o as judge model.
 
 import asyncio
 import os
+import random
 from typing import Any
 
 from deepeval.metrics import (
@@ -64,18 +65,10 @@ METRIC_REGISTRY: dict[str, Any] = {
             LLMTestCaseParams.EXPECTED_OUTPUT,
         ],
     ),
-    "hallucination": lambda model, threshold: HallucinationMetric(
-        model=model, threshold=threshold
-    ),
-    "toxicity": lambda model, threshold: ToxicityMetric(
-        model=model, threshold=threshold
-    ),
-    "bias": lambda model, threshold: BiasMetric(
-        model=model, threshold=threshold
-    ),
-    "faithfulness": lambda model, threshold: FaithfulnessMetric(
-        model=model, threshold=threshold
-    ),
+    "hallucination": lambda model, threshold: HallucinationMetric(model=model, threshold=threshold),
+    "toxicity": lambda model, threshold: ToxicityMetric(model=model, threshold=threshold),
+    "bias": lambda model, threshold: BiasMetric(model=model, threshold=threshold),
+    "faithfulness": lambda model, threshold: FaithfulnessMetric(model=model, threshold=threshold),
 }
 
 
@@ -125,6 +118,25 @@ def _build_llm_test_case(
         kwargs["retrieval_context"] = [context]
 
     return LLMTestCase(**kwargs)
+
+
+async def _measure_with_retry(metric, test_case, max_attempts: int = 3) -> None:
+    """Run metric.measure with exponential backoff retry.
+
+    Sleeps 2s, 4s before retries 2 and 3. Raises on final failure.
+    """
+    for attempt in range(max_attempts):
+        try:
+            await asyncio.to_thread(metric.measure, test_case)
+            return
+        except Exception as e:
+            if attempt == max_attempts - 1:
+                raise
+            delay = 2.0 * (2**attempt)
+            logger.warning(
+                f"{type(metric).__name__} attempt {attempt + 1} failed: {e}. Retry in {delay}s"
+            )
+            await asyncio.sleep(delay)
 
 
 CONVERSATIONAL_METRICS = {
@@ -252,6 +264,8 @@ async def evaluate_case(
             actual_output = msg["content"]
             break
 
+    logger.info(f"Evaluating {len(metric_names)} metrics: {metric_names}")
+
     for name in metric_names:
         # --- Tier 1: deterministic checks ---
         if name == "exact_match":
@@ -292,12 +306,10 @@ async def evaluate_case(
                     turns, conversation, expected_output, context
                 )
             else:
-                test_case = _build_llm_test_case(
-                    turns, conversation, expected_output, context
-                )
+                test_case = _build_llm_test_case(turns, conversation, expected_output, context)
 
-            # DeepEval metrics have a measure() method
-            await asyncio.to_thread(metric.measure, test_case)
+            await asyncio.sleep(random.uniform(0, 1.5))
+            await _measure_with_retry(metric, test_case)
 
             results[name] = {
                 "score": metric.score,

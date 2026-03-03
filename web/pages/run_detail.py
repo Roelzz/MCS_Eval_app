@@ -1,5 +1,6 @@
 """Run detail page — full results view with expandable rows."""
 
+import asyncio
 import json
 from datetime import datetime
 
@@ -19,19 +20,52 @@ def _color_for_score(val: float) -> str:
     return "red"
 
 
+class ScoreItem(rx.Base):
+    name: str = ""
+    raw: str = ""
+    val_pct: str = ""
+    val_text: str = ""
+    color: str = "gray"
+    reason: str = ""
+    bar_width: str = "0%"
+
+
+class ConvTurn(rx.Base):
+    role: str = ""
+    content: str = ""
+    is_user: bool = False
+
+
+class ToolLine(rx.Base):
+    icon: str = "zap"
+    text: str = ""
+    color: str = "gray"
+
+
+class ResultRow(rx.Base):
+    index: int = 0
+    num: str = ""
+    passed: bool = False
+    duration: str = ""
+    actual_output: str = ""
+    expected_output: str = ""
+    scores_summary: str = ""
+    score_items: list[ScoreItem] = []
+    scores_color: str = "gray"
+    conv_turns: list[ConvTurn] = []
+    tool_lines: list[ToolLine] = []
+    has_error: bool = False
+
+
 class RunDetailState(State):
     run: dict = {}
-    results: list[dict] = []
+    results: list[ResultRow] = []
     expanded_result: int = -1
     dataset_name: str = ""
+    is_live: bool = False
 
-    def load_run(self) -> None:
-        run_id_str = self.router.page.params.get("run_id", "0")
-        try:
-            run_id = int(run_id_str)
-        except (ValueError, TypeError):
-            return
-
+    def _load_run_data(self, run_id: int) -> None:
+        """Load run + results from DB into state. Does not touch is_live."""
         with rx.session() as session:
             run_obj = session.get(EvalRun, run_id)
             if not run_obj:
@@ -69,33 +103,25 @@ class RunDetailState(State):
 
             self.results = []
             for r in result_rows:
-                scores_raw = (
-                    json.loads(r.scores_json) if r.scores_json else {}
-                )
+                scores_raw = json.loads(r.scores_json) if r.scores_json else {}
 
                 # Build structured score items for visual rendering
-                score_items = []
+                score_items: list[ScoreItem] = []
                 overall_color = "gray"
                 for mname, data in scores_raw.items():
-                    val = (
-                        data.get("score", 0)
-                        if isinstance(data, dict) else 0
-                    )
-                    reason = (
-                        data.get("reason", "")
-                        if isinstance(data, dict) else ""
-                    )
+                    val = data.get("score", 0) if isinstance(data, dict) else 0
+                    reason = data.get("reason", "") if isinstance(data, dict) else ""
                     color = _color_for_score(val)
                     pct = round(val * 100)
-                    score_items.append({
-                        "name": mname.replace("_", " ").title(),
-                        "raw": mname,
-                        "val_pct": str(pct),
-                        "val_text": f"{val:.0%}",
-                        "color": color,
-                        "reason": reason,
-                        "bar_width": f"{pct}%",
-                    })
+                    score_items.append(ScoreItem(
+                        name=mname.replace("_", " ").title(),
+                        raw=mname,
+                        val_pct=str(pct),
+                        val_text=f"{val:.0%}",
+                        color=color,
+                        reason=reason,
+                        bar_width=f"{pct}%",
+                    ))
                     if color == "red":
                         overall_color = "red"
                     elif color == "yellow" and overall_color != "red":
@@ -104,7 +130,7 @@ class RunDetailState(State):
                         overall_color = "green"
 
                 scores_summary = " · ".join(
-                    f"{it['raw']}: {it['val_text']}"
+                    f"{it.raw}: {it.val_text}"
                     for it in score_items
                 )
 
@@ -112,26 +138,22 @@ class RunDetailState(State):
                 input_turns = (
                     json.loads(r.input_json) if r.input_json else []
                 )
-                conv_turns = []
+                conv_turns: list[ConvTurn] = []
                 for t in input_turns:
                     role = t.get("role", "user")
-                    conv_turns.append({
-                        "role": "User" if role == "user" else "Assistant",
-                        "content": t.get("content", ""),
-                        "is_user": role == "user",
-                    })
+                    conv_turns.append(ConvTurn(
+                        role="User" if role == "user" else "Assistant",
+                        content=t.get("content", ""),
+                        is_user=role == "user",
+                    ))
 
-                # Parse tool/non-message activities
-                raw_activities = (
-                    json.loads(r.activities_json) if r.activities_json else []
-                )
+                raw_activities = json.loads(r.activities_json) if r.activities_json else []
                 tool_activities = [
-                    a for a in raw_activities
-                    if a.get("type") not in (
-                        "message", "end_of_conversation", "typing", None
-                    )
+                    a
+                    for a in raw_activities
+                    if a.get("type") not in ("message", "end_of_conversation", "typing", None)
                 ]
-                tool_lines = []
+                tool_lines: list[ToolLine] = []
                 if tool_activities:
                     for a in tool_activities:
                         atype = a.get("type", "?")
@@ -149,14 +171,14 @@ class RunDetailState(State):
                             line = f"Plan · Topics: {', '.join(topics)}"
                             if kinds:
                                 line += f"  |  Tools: {', '.join(kinds)}"
-                            tool_lines.append({"icon": "map", "text": line, "color": "blue"})
+                            tool_lines.append(ToolLine(icon="map", text=line, color="blue"))
 
                         elif aname == "DynamicPlanStepTriggered":
                             topic = value.get("taskDialogId", "").rsplit(".", 1)[-1]
                             state = value.get("state", "?")
                             step_type = value.get("type", "?")
                             line = f"Step · {topic} [{step_type}] state: {state}"
-                            tool_lines.append({"icon": "play", "text": line, "color": "teal"})
+                            tool_lines.append(ToolLine(icon="play", text=line, color="teal"))
 
                         elif aname == "DynamicPlanStepBindUpdate":
                             topic = value.get("taskDialogId", "").rsplit(".", 1)[-1]
@@ -164,32 +186,65 @@ class RunDetailState(State):
                             line = f"Bind · {topic}"
                             if args:
                                 line += f"  args: {args}"
-                            tool_lines.append({"icon": "link", "text": line, "color": "purple"})
+                            tool_lines.append(ToolLine(icon="link", text=line, color="purple"))
+
+                        elif atype == "retro_info":
+                            outcome = a.get("session_outcome", "Unknown")
+                            csat = a.get("csat")
+                            length = a.get("conversation_length")
+                            csat_str = f"  |  CSAT: {csat:.1f}" if csat is not None else ""
+                            length_str = f"  |  Turns: {length}" if length is not None else ""
+                            line = f"Outcome: {outcome}{csat_str}{length_str}"
+                            tool_lines.append(ToolLine(icon="history", text=line, color="teal"))
 
                         else:
                             line = f"[{atype}] {aname}"
                             if value:
                                 line += f"  →  {value}"
-                            tool_lines.append({"icon": "zap", "text": line, "color": "gray"})
+                            tool_lines.append(ToolLine(icon="zap", text=line, color="gray"))
 
                 if not tool_lines:
-                    tool_lines.append({"icon": "minus", "text": "No tool activity captured", "color": "gray"})
+                    tool_lines.append(ToolLine(icon="minus", text="No tool activity captured", color="gray"))
 
-                self.results.append({
-                    "index": r.test_case_index,
-                    "num": str(r.test_case_index + 1),
-                    "passed": r.passed,
-                    "duration": f"{r.duration_seconds:.1f}s",
-                    "actual_output": r.actual_output or "",
-                    "expected_output": r.expected_output or "",
-                    "scores_summary": scores_summary,
-                    "score_items": score_items,
-                    "scores_color": overall_color,
-                    "conv_turns": conv_turns,
-                    "tool_lines": tool_lines,
-                })
+                self.results.append(ResultRow(
+                    index=r.test_case_index,
+                    num=str(r.test_case_index + 1),
+                    passed=r.passed,
+                    duration=f"{r.duration_seconds:.1f}s",
+                    actual_output=r.actual_output or "",
+                    expected_output=r.expected_output or "",
+                    scores_summary=scores_summary,
+                    score_items=score_items,
+                    scores_color=overall_color,
+                    conv_turns=conv_turns,
+                    tool_lines=tool_lines,
+                    has_error=(r.actual_output or "").startswith("Error:"),
+                ))
 
-        self.expanded_result = -1
+    def load_run(self) -> None:
+        run_id_str = self.router.page.params.get("run_id", "0")
+        try:
+            run_id = int(run_id_str)
+        except (ValueError, TypeError):
+            return
+
+        self._load_run_data(run_id)
+        self.expanded_result = -1  # reset on initial page load only
+
+        if self.run.get("status") == "running" and not self.is_live:
+            self.is_live = True
+            return RunDetailState.live_poll(run_id)
+
+    @rx.event(background=True)
+    async def live_poll(self, run_id: int) -> None:
+        """Poll DB every 3s while run is still executing."""
+        while True:
+            await asyncio.sleep(3)
+            async with self:
+                self._load_run_data(run_id)
+                if self.run.get("status") not in ("running", "pending"):
+                    self.is_live = False
+                    break
 
     def toggle_result(self, index: int) -> None:
         if self.expanded_result == index:
@@ -197,7 +252,9 @@ class RunDetailState(State):
         else:
             self.expanded_result = index
 
-    def rerun(self) -> rx.Component:
+    def rerun(self):
+        from web.pages.runs import RunState
+
         run_id_str = self.router.page.params.get("run_id", "0")
         try:
             run_id = int(run_id_str)
@@ -212,8 +269,9 @@ class RunDetailState(State):
             if not dataset:
                 return
 
+            base_name = original.name.split(" (rerun)")[0]
             run = EvalRun(
-                name=f"{original.name} (rerun)",
+                name=f"{base_name} (rerun)",
                 dataset_id=original.dataset_id,
                 status="pending",
                 metrics_json=original.metrics_json,
@@ -226,7 +284,8 @@ class RunDetailState(State):
             session.refresh(run)
             new_run_id = run.id
 
-        return rx.redirect(f"/runs/{new_run_id}")
+        yield rx.redirect(f"/runs/{new_run_id}")
+        yield RunState.execute_run(new_run_id)
 
     def export_results(self) -> rx.Component:
         export_data = {
@@ -235,9 +294,7 @@ class RunDetailState(State):
         }
         return rx.download(
             data=json.dumps(export_data, indent=2, default=str),
-            filename=(
-                f"run_{self.run.get('id', 'unknown')}_results.json"
-            ),
+            filename=(f"run_{self.run.get('id', 'unknown')}_results.json"),
         )
 
 
@@ -415,13 +472,23 @@ def _tool_line(item: rx.Var) -> rx.Component:
 def _expanded_content(r: rx.Var) -> rx.Component:
     return rx.vstack(
         rx.separator(margin_top="4px", margin_bottom="8px"),
+        # Error callout (shown when actual_output starts with "Error:")
+        rx.cond(
+            r["has_error"],
+            rx.callout(
+                r["actual_output"].to(str),
+                icon="triangle_alert",
+                color_scheme="red",
+                width="100%",
+            ),
+        ),
         # Conversation
         rx.cond(
             r["conv_turns"].length() > 0,
             rx.vstack(
                 rx.hstack(
                     rx.icon("message-circle", size=14, color="var(--accent-9)"),
-                    rx.text("Conversation", size="2", weight="semibold"),
+                    rx.text("Conversation", size="2", weight="bold"),
                     spacing="2",
                     align="center",
                 ),
@@ -499,7 +566,7 @@ def _expanded_content(r: rx.Var) -> rx.Component:
             rx.vstack(
                 rx.hstack(
                     rx.icon("bar-chart-2", size=14, color="var(--accent-9)"),
-                    rx.text("Metric Scores", size="2", weight="semibold"),
+                    rx.text("Metric Scores", size="2", weight="bold"),
                     spacing="2",
                     align="center",
                 ),
@@ -520,7 +587,7 @@ def _expanded_content(r: rx.Var) -> rx.Component:
         rx.vstack(
             rx.hstack(
                 rx.icon("zap", size=14, color="var(--accent-9)"),
-                rx.text("Tool Activity", size="2", weight="semibold"),
+                rx.text("Tool Activity", size="2", weight="bold"),
                 spacing="2",
                 align="center",
             ),
@@ -721,6 +788,10 @@ def _header_section() -> rx.Component:
                 spacing="3",
                 align="center",
             ),
+            rx.cond(
+                RunDetailState.is_live,
+                rx.badge("● Live", color_scheme="teal", variant="soft", size="1"),
+            ),
             rx.spacer(),
             rx.button(
                 rx.icon("rotate-cw", size=14),
@@ -765,7 +836,7 @@ def _results_section() -> rx.Component:
                 rx.text(
                     "Results",
                     size="3",
-                    weight="semibold",
+                    weight="bold",
                 ),
                 rx.badge(
                     RunDetailState.results.length().to(str),

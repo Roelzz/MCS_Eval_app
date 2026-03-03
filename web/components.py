@@ -101,6 +101,7 @@ def sidebar() -> rx.Component:
                 sidebar_link("Dashboard", "/", "layout-dashboard"),
                 sidebar_link("Datasets", "/datasets", "database"),
                 sidebar_link("Eval Runs", "/runs", "play"),
+                sidebar_link("Transcript Extract", "/retro", "history"),
                 sidebar_link("Setup", "/setup", "rocket"),
                 sidebar_link("Settings", "/settings", "settings"),
                 spacing="1",
