@@ -7,7 +7,8 @@ import json
 import reflex as rx
 
 from web.components import layout
-from web.models import Dataset
+from sqlmodel import select
+from web.models import Dataset, KnowledgeSource
 from web.state import State
 
 
@@ -134,8 +135,6 @@ class DatasetDetailState(State):
     def load_knowledge_sources(self) -> None:
         """Load all available sources and which ones are linked to this dataset."""
         with rx.session() as session:
-            from sqlmodel import select
-            from web.models import KnowledgeSource
             all_ks = session.exec(
                 select(KnowledgeSource).order_by(KnowledgeSource.name)
             ).all()

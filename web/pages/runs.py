@@ -10,7 +10,7 @@ from loguru import logger
 from sqlmodel import select
 
 from web.components import empty_state, layout, page_header, status_badge
-from web.models import Dataset, EvalResult, EvalRun
+from web.models import Dataset, EvalResult, EvalRun, KnowledgeSource
 from web.state import State
 
 AVAILABLE_METRICS = [
@@ -302,7 +302,6 @@ class RunState(State):
                 ks_ids: list[int] = json.loads(dataset.knowledge_source_ids)
                 dataset_context = ""
                 if ks_ids:
-                    from web.models import KnowledgeSource
                     ks_rows = [session.get(KnowledgeSource, kid) for kid in ks_ids]
                     dataset_context = "\n\n".join(
                         ks.content for ks in ks_rows if ks is not None

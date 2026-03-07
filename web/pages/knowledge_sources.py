@@ -1,6 +1,4 @@
 """Knowledge Sources page — upload and manage reusable context documents."""
-import json
-
 import reflex as rx
 from sqlmodel import select
 
