@@ -10,6 +10,7 @@ from web.pages.retro import retro_page  # noqa: F401
 from web.pages.retro_suggest import retro_suggest_page  # noqa: F401
 from web.pages.retro_conversations import retro_conversations_page  # noqa: F401
 from web.pages.knowledge_sources import knowledge_sources_page  # noqa: F401
+from web.pages.scenarios import scenarios_page  # noqa: F401
 from web.pages.runs import runs_page  # noqa: F401
 from web.pages.settings import settings_page  # noqa: F401
 from web.pages.setup import setup_page  # noqa: F401

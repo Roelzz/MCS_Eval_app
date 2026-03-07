@@ -101,6 +101,7 @@ def sidebar() -> rx.Component:
                 sidebar_link("Dashboard", "/", "layout-dashboard"),
                 sidebar_link("Datasets", "/datasets", "database"),
                 sidebar_link("Knowledge Sources", "/knowledge-sources", "file-text"),
+                sidebar_link("Scenario Wizard", "/scenarios", "wand"),
                 sidebar_link("Eval Runs", "/runs", "play"),
                 sidebar_link("Transcript Extract", "/retro", "history"),
                 sidebar_link("Setup", "/setup", "rocket"),
