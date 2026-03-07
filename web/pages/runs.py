@@ -10,7 +10,7 @@ from loguru import logger
 from sqlmodel import select
 
 from web.components import empty_state, layout, page_header, status_badge
-from web.models import Dataset, EvalResult, EvalRun
+from web.models import Dataset, EvalResult, EvalRun, KnowledgeSource
 from web.state import State
 
 AVAILABLE_METRICS = [
@@ -297,6 +297,16 @@ class RunState(State):
                     return
 
                 cases = json.loads(dataset.data_json)
+
+                # Pre-fetch dataset knowledge source texts for context fallback
+                ks_ids: list[int] = json.loads(dataset.knowledge_source_ids)
+                dataset_context = ""
+                if ks_ids:
+                    ks_rows = [session.get(KnowledgeSource, kid) for kid in ks_ids]
+                    dataset_context = "\n\n".join(
+                        ks.content for ks in ks_rows if ks is not None
+                    )
+
                 metrics = json.loads(run.metrics_json)
                 config = json.loads(run.config_json)
                 threshold = config.get("threshold", 0.5)
@@ -311,7 +321,7 @@ class RunState(State):
                 try:
                     turns = case.get("turns", [])
                     expected = case.get("expected_output", "")
-                    context = case.get("context", "")
+                    context = case.get("context", "") or dataset_context
                     expected_topic = case.get("expected_topic", "")
                     keywords_any = case.get("keywords_any", [])
                     keywords_all = case.get("keywords_all", [])

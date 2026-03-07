@@ -13,6 +13,15 @@ class Dataset(rx.Model, table=True):
     data_json: str = "[]"  # JSON string: list of test cases
     num_cases: int = 0
     created_at: datetime = sqlmodel.Field(default_factory=lambda: datetime.now(UTC))
+    knowledge_source_ids: str = "[]"  # JSON list of KnowledgeSource IDs
+
+
+class KnowledgeSource(rx.Model, table=True):
+    name: str
+    file_type: str  # txt | md | pdf | docx
+    content: str
+    size_bytes: int
+    created_at: datetime = sqlmodel.Field(default_factory=lambda: datetime.now(UTC))
 
 
 class EvalRun(rx.Model, table=True):
