@@ -57,6 +57,10 @@ class DatasetDetailState(State):
     show_delete_case_dialog: bool = False
     delete_case_index: int = -1
 
+    # Knowledge sources
+    available_sources: list[dict] = []   # all sources in the system
+    linked_source_ids: list[int] = []    # IDs currently linked to this dataset
+
     def load_dataset(self) -> None:
         ds_id_str = self.router.page.params.get("dataset_id", "0")
         try:
@@ -124,6 +128,39 @@ class DatasetDetailState(State):
                     "data": json.dumps(case),
                 }
             )
+
+        self.load_knowledge_sources()
+
+    def load_knowledge_sources(self) -> None:
+        """Load all available sources and which ones are linked to this dataset."""
+        with rx.session() as session:
+            from sqlmodel import select
+            from web.models import KnowledgeSource
+            all_ks = session.exec(
+                select(KnowledgeSource).order_by(KnowledgeSource.name)
+            ).all()
+            self.available_sources = [
+                {"id": ks.id, "name": ks.name, "file_type": ks.file_type}
+                for ks in all_ks
+            ]
+            dataset = session.get(Dataset, self.ds_id)
+            if dataset:
+                self.linked_source_ids = json.loads(dataset.knowledge_source_ids)
+
+    def toggle_knowledge_source(self, ks_id: int) -> None:
+        """Link or unlink a knowledge source from this dataset."""
+        ids = list(self.linked_source_ids)
+        if ks_id in ids:
+            ids.remove(ks_id)
+        else:
+            ids.append(ks_id)
+        with rx.session() as session:
+            dataset = session.get(Dataset, self.ds_id)
+            if dataset:
+                dataset.knowledge_source_ids = json.dumps(ids)
+                session.add(dataset)
+                session.commit()
+        self.linked_source_ids = ids
 
     # --- Edit metadata ---
 
@@ -1095,6 +1132,55 @@ def dataset_detail_page() -> rx.Component:
     return layout(
         rx.vstack(
             _metadata_section(),
+            rx.box(
+                rx.vstack(
+                    rx.hstack(
+                        rx.icon("file-text", size=16, color="var(--gray-a9)"),
+                        rx.text("Knowledge Sources", size="3", weight="medium"),
+                        spacing="2",
+                        align="center",
+                    ),
+                    rx.text(
+                        "These documents provide context for faithfulness and hallucination metrics. "
+                        "Per-test-case context fields override these defaults.",
+                        size="2",
+                        color="var(--gray-a9)",
+                    ),
+                    rx.cond(
+                        DatasetDetailState.available_sources.length() > 0,
+                        rx.vstack(
+                            rx.foreach(
+                                DatasetDetailState.available_sources,
+                                lambda ks: rx.hstack(
+                                    rx.checkbox(
+                                        checked=DatasetDetailState.linked_source_ids.contains(ks["id"]),
+                                        on_change=lambda _: DatasetDetailState.toggle_knowledge_source(ks["id"]),
+                                    ),
+                                    rx.badge(ks["file_type"], variant="soft", size="1"),
+                                    rx.text(ks["name"], size="2"),
+                                    spacing="2",
+                                    align="center",
+                                ),
+                            ),
+                            spacing="2",
+                            width="100%",
+                        ),
+                        rx.text(
+                            "No knowledge sources uploaded yet. ",
+                            rx.link("Upload one", href="/knowledge-sources"),
+                            ".",
+                            size="2",
+                            color="var(--gray-a9)",
+                        ),
+                    ),
+                    spacing="3",
+                    width="100%",
+                ),
+                padding="16px",
+                border="1px solid var(--gray-a4)",
+                border_radius="var(--radius-3)",
+                width="100%",
+            ),
             _cases_table(),
             _add_case_dialog(),
             _edit_case_dialog(),
